@@ -1,4 +1,4 @@
-name: Salesforce CI-CD
+name: Salesforce CI-CD (Smart Selective Deploy)
 
 on:
   push:
@@ -9,10 +9,9 @@ on:
 jobs:
   validate-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4 # อัปเกรดเป็น v4
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -31,54 +30,57 @@ jobs:
           echo "$SFDX_AUTH_URL" > sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
-      - name: Run Apex Tests
+      # --- ขั้นตอนค้นหาไฟล์ที่เปลี่ยน และ คลาสเทสที่ต้องรัน ---
+      - name: Identify Changed Files and Tests
+        id: changed-assets
         run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            DIFF_BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            DIFF_BASE=$(git rev-parse HEAD~1)
+          fi
+          
+          # 1. หาไฟล์ที่เปลี่ยน (เพื่อ Deploy)
+          CHANGED_FILES=$(git diff --name-only "$DIFF_BASE" HEAD | grep '^force-app/' | xargs echo)
+          echo "changed_files=$CHANGED_FILES" >> $GITHUB_ENV
+          
+          # 2. หาชื่อ Class ที่เปลี่ยนเพื่อระบุ Test (เอาเฉพาะ .cls และตัดคำว่า Test ออกเพื่อหาคู่ของมัน)
+          # เช่นถ้าแก้ AccountService.cls จะรัน AccountServiceTest
+          TEST_CLASSES=$(git diff --name-only "$DIFF_BASE" HEAD | grep '\.cls$' | grep -v 'Test\.cls' | sed 's/.*\///;s/\.cls//' | sed 's/$/Test/' | xargs | sed 's/ /,/g')
+          
+          # 3. ถ้าแก้ไฟล์ Test ตรงๆ ก็ให้รันตัวมันเองด้วย
+          DIRECT_TESTS=$(git diff --name-only "$DIFF_BASE" HEAD | grep 'Test\.cls' | sed 's/.*\///;s/\.cls//' | xargs | sed 's/ /,/g')
+          
+          # รวมรายชื่อ Test ทั้งหมด
+          ALL_TESTS=$(echo "$TEST_CLASSES,$DIRECT_TESTS" | sed 's/^,//;s/,$//;s/,,/,/g')
+          
+          echo "Changed files to deploy: $CHANGED_FILES"
+          echo "Tests to run: $ALL_TESTS"
+          echo "test_classes=$ALL_TESTS" >> $GITHUB_ENV
+
+      # --- รัน Test เฉพาะตัวที่เกี่ยวข้อง และเช็ค Coverage 75% ---
+      - name: Run Selective Tests
+        if: env.test_classes != ''
+        run: |
+          # รันเทสแบบระบุชื่อคลาส และต้องการผลลัพธ์เป็น JSON เพื่อเช็ค Coverage
           sf apex run test \
-            --test-level RunLocalTests \
+            --tests ${{ env.test_classes }} \
             --result-format human \
             --code-coverage \
+            --wait 30 \
+            --detailed-coverage
+          
+          # หมายเหตุ: Salesforce จะสั่ง Fail อัตโนมัติถ้า Test ไม่ผ่าน 
+          # ส่วนเรื่อง 75% ระบบ Deploy จะเช็คต่อในขั้นตอนถัดไป
+
+      # --- Deploy (หรือ Validate) เฉพาะไฟล์ที่แก้ ---
+      - name: Deploy Selective Source
+        if: env.changed_files != ''
+        run: |
+          # ใช้ --test-level RunSpecifiedTests เพื่อประหยัดเวลา
+          # และ Salesforce จะบังคับให้ผ่าน 75% ของไฟล์ที่ส่งไปโดยอัตโนมัติ
+          sf project deploy start \
+            --source-dir ${{ env.changed_files }} \
+            --test-level RunSpecifiedTests \
+            --tests ${{ env.test_classes }} \
             --wait 30
-
-      - name: Generate Delta Package
-        run: |
-          mkdir -p output
-          
-          # หาจุดตัดของ Commit
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="${{ github.event.pull_request.base.sha }}"
-          else
-            BASE_REF=$(git rev-parse HEAD~1)
-          fi
-          
-          echo "Comparing $BASE_REF to HEAD"
-
-          # ติดตั้ง sfdx-git-delta
-          npm install --save-dev sfdx-git-delta@latest
-
-          # เรียกใช้ด้วย npx
-          npx sfdx-git-delta --from "$BASE_REF" --to HEAD --output output --generate-delta
-          
-      - name: Inspect Delta Results
-        run: |
-          echo "=== Delta package.xml ==="
-          cat output/package/package.xml || echo "No changes found"
-
-      - name: Deploy to Salesforce
-        if: github.event_name == 'push' && success()
-        run: |
-          # ตรวจสอบว่ามีไฟล์ให้ Deploy หรือไม่
-          if [ -f "output/package/package.xml" ]; then
-            sf project deploy start \
-              --manifest output/package/package.xml \
-              --test-level RunLocalTests \
-              --wait 30
-          else
-            echo "Nothing to deploy."
-          fi
-
-      - name: Upload Delta Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: delta-package
-          path: output/

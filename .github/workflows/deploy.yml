@@ -9,24 +9,26 @@ on:
 jobs:
   validate-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      # เพิ่ม PATH ให้แน่ใจว่า npm global bin อยู่ใน PATH (runner ปกติมีอยู่แล้ว)
+      PATH: ${{ runner.tool_cache }}/node/$(node -v)/x64/bin:$PATH
     steps:
-      # 1. ดึง Code จาก GitHub (fetch full history เพื่อให้ HEAD~1 ใช้ได้)
       - name: Checkout source code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      # 2. ติดตั้ง Node และ Salesforce CLI
       - name: Install Salesforce CLI
         run: npm install @salesforce/cli --global
 
-      # 3. ติดตั้ง sfdx-git-delta plugin ให้กับ sf (ไม่ให้ล้ม workflow ถ้าติดตั้งแล้ว)
-      - name: Install sfdx-git-delta plugin
+      - name: Install sfdx-git-delta plugin for sf (and verify)
         run: |
-          set -e
+          set -euo pipefail
+          # ติดตั้ง plugin ให้กับ sf (ไม่ล้ม workflow ถ้าติดตั้งแล้ว)
           sf plugins install sfdx-git-delta@latest || true
+          echo "Installed sf plugins:"
+          sf plugins || true
 
-      # 4. Authenticate to Salesforce (จาก secret SFDX_AUTH_URL)
       - name: Authenticate to Salesforce
         env:
           SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
@@ -35,7 +37,6 @@ jobs:
           chmod 600 sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
-      # 5. รัน Apex Tests (ทั้ง PR และ push จะรัน)
       - name: Run Apex All Tests with Coverage Check
         run: |
           sf apex run test \
@@ -44,18 +45,16 @@ jobs:
             --code-coverage \
             --wait 30
 
-      # 6. เตรียมโฟลเดอร์ผลลัพธ์ (output) เพื่อให้ sgd เขียนลงได้
       - name: Prepare output folder
         run: mkdir -p output
 
-      # 7. สร้าง Delta (ใช้ sf sgd เป็นหลัก, fallback เป็น npx sfdx-git-delta)
-      - name: Generate Delta Package
+      - name: Generate Delta Package (use sf sgd, fallback to global sgd)
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          # เลือก base ref: ถ้าเป็น PR ให้ใช้ base.sha ของ PR, ถ้าเป็น push ให้ใช้ HEAD~1
+          # determine base ref
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             BASE_REF="${{ github.event.pull_request.base.sha }}"
           else
@@ -64,15 +63,31 @@ jobs:
 
           echo "Generating delta from $BASE_REF to HEAD into output/"
 
-          # ถ้า sf sgd มีอยู่ ให้ใช้ sf sgd
+          # Primary: use sf sgd if available
           if sf sgd source delta --help > /dev/null 2>&1; then
+            echo "Using sf sgd (plugin) to generate delta..."
             sf sgd source delta --from "$BASE_REF" --to HEAD --output-dir output --generate-delta
-          else
-            # fallback: ใช้ npx กับชื่อแพ็กเกจที่ถูกต้อง
-            npx sfdx-git-delta --from "$BASE_REF" --to HEAD --output output --generate-delta
+            exit 0
           fi
 
-      # 8. ตรวจสอบเนื้อหาใน output
+          # Fallback 1: try to use sgd binary if already installed globally
+          if command -v sgd > /dev/null 2>&1; then
+            echo "Using global sgd binary to generate delta..."
+            sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
+            exit 0
+          fi
+
+          # Fallback 2: install sfdx-git-delta globally and use sgd binary (avoid npx)
+          echo "sf sgd not available. Installing sfdx-git-delta globally as fallback..."
+          npm install -g sfdx-git-delta@latest
+          if command -v sgd > /dev/null 2>&1; then
+            echo "Running sgd (global) to generate delta..."
+            sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
+          else
+            echo "ERROR: sgd binary not found after global install. Aborting."
+            exit 1
+          fi
+
       - name: Inspect delta output
         run: |
           echo "=== output contents ==="
@@ -80,19 +95,15 @@ jobs:
           echo "=== recursive listing ==="
           ls -R output || true
 
-      # 9. Deploy เฉพาะเมื่อเป็น push และขั้นตอนก่อนหน้าสำเร็จ
       - name: Deploy Delta to Salesforce
         if: github.event_name == 'push' && success()
         run: |
           set -euo pipefail
-
-          # ถ้า output ว่าง ให้หยุด
           if [ -z "$(ls -A output 2>/dev/null || true)" ]; then
             echo "No delta content found in output. Aborting deploy."
             exit 1
           fi
 
-          # Deploy จาก output (SFDX source format)
           sf project deploy start \
             --source-dir output \
             --test-level RunLocalTests \

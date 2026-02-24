@@ -28,12 +28,12 @@ jobs:
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
       # 4. รัน Test และ Validate (ตรวจเช็คเฉยๆ ไม่ Deploy จริง)
-      - name: Validate Source
-        if: github.event_name == 'pull_request'
+      - name: Run Apex All Tests with Coverage Check
         run: |
-          sf project deploy validate \
-            --source-dir force-app \
+          sf apex run test \
             --test-level RunLocalTests \
+            --result-format human \
+            --code-coverage \
             --wait 30
 
       # 5. Deploy จริง (เมื่อมีการ Push/Merge เข้า main เท่านั้น)

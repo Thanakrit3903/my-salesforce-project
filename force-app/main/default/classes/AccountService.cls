@@ -4,6 +4,8 @@ public with sharing class AccountService {
         for (Account acc : accs) {
             if (acc.Industry == 'Technology') {
                 acc.Rating = 'Hot';
+            } else if (acc.Industry == 'Banking') {
+                acc.Rating = 'Cold';
             }
         }
     }

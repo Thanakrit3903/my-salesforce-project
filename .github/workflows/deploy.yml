@@ -2,33 +2,35 @@ name: Salesforce CI-CD
 
 on:
   push:
-    branches: [ main ] # Deploy เมื่อ push ลง main
+    branches: [ main ]
   pull_request:
-    branches: [ main ] # รัน Test เมื่อมีคนเปิด PR เพื่อตรวจสอบก่อนรวมเข้า main
+    branches: [ main ]
 
 jobs:
   validate-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      # 1. ดึง Code จาก GitHub
       - name: Checkout source code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      # 2. ติดตั้ง Salesforce CLI
       - name: Install Salesforce CLI
         run: npm install @salesforce/cli --global
 
-      # 3. Login เข้า Salesforce โดยใช้กุญแจที่เราเก็บไว้ใน Secrets
+      - name: Install sfdx-git-delta plugin
+        run: |
+          # ติดตั้ง plugin กับ sf; ถ้าล้มเหลวให้ยังไม่หยุด workflow
+          sf plugins install sfdx-git-delta@latest || true
+
       - name: Authenticate to Salesforce
         run: |
           echo "${{ secrets.SFDX_AUTH_URL }}" > sfdx_auth.txt
           chmod 600 sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
-      # 4. รัน Test และ Validate (ตรวจเช็คเฉยๆ ไม่ Deploy จริง)
       - name: Run Apex All Tests with Coverage Check
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
         run: |
           sf apex run test \
             --test-level RunLocalTests \
@@ -36,11 +38,41 @@ jobs:
             --code-coverage \
             --wait 30
 
-      # 5. Deploy จริง (เมื่อมีการ Push/Merge เข้า main เท่านั้น)
-      - name: Deploy to Salesforce
+      - name: Prepare delta folder
+        run: mkdir -p output
+
+      - name: Generate Delta Package using sgd
+        run: |
+          # ใช้ commit SHA ของ base ถ้าเป็น PR ให้เปรียบเทียบกับ base branch
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_REF="${{ github.event.pull_request.base.sha }}"
+          else
+            # ถ้าเป็น push เปรียบเทียบกับ HEAD~1
+            BASE_REF="$(git rev-parse --verify HEAD~1)"
+          fi
+
+          echo "Generating delta from $BASE_REF to HEAD into output/"
+          # พยายามใช้ sf sgd ก่อน ถ้าไม่สำเร็จให้ fallback ไปใช้ npx sgd
+          if sf sgd source delta --help > /dev/null 2>&1; then
+            sf sgd source delta --from "$BASE_REF" --to HEAD --output-dir output --generate-delta
+          else
+            # npx อาจเจอปัญหา permission บนบาง runner แต่เป็น fallback
+            npx sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
+          fi
+
+      - name: Inspect delta output
+        run: ls -R output || true
+
+      - name: Deploy Delta to Salesforce
         if: github.event_name == 'push' && success()
         run: |
+          # ถ้า output ว่าง ให้หยุดและแสดงข้อความ
+          if [ -z "$(ls -A output 2>/dev/null)" ]; then
+            echo "No delta content found in output. Aborting deploy."
+            exit 1
+          fi
+
           sf project deploy start \
-            --source-dir force-app \
+            --source-dir output \
             --test-level RunLocalTests \
             --wait 30

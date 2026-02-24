@@ -38,7 +38,7 @@ jobs:
 
       # 5. Deploy จริง (เมื่อมีการ Push/Merge เข้า main เท่านั้น)
       - name: Deploy to Salesforce
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && success()
         run: |
           sf project deploy start \
             --source-dir force-app \

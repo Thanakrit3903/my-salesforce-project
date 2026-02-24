@@ -9,36 +9,53 @@ on:
 jobs:
   validate-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      # เพิ่ม PATH ให้แน่ใจว่า npm global bin อยู่ใน PATH (runner ปกติมีอยู่แล้ว)
-      PATH: ${{ runner.tool_cache }}/node/$(node -v)/x64/bin:$PATH
+    timeout-minutes: 60
     steps:
       - name: Checkout source code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
       - name: Install Salesforce CLI
         run: npm install @salesforce/cli --global
 
-      - name: Install sfdx-git-delta plugin for sf (and verify)
+      - name: Verify sf binary and plugins (debug)
+        run: |
+          echo "sf version and path"
+          sf --version || true
+          which sf || whereis sf || true
+          echo "sf plugins list"
+          sf plugins || true
+
+      - name: Install sfdx-git-delta plugin for sf (primary)
         run: |
           set -euo pipefail
-          # ติดตั้ง plugin ให้กับ sf (ไม่ล้ม workflow ถ้าติดตั้งแล้ว)
+          # install plugin for sf; ignore error if already installed
           sf plugins install sfdx-git-delta@latest || true
-          echo "Installed sf plugins:"
+          echo "sf plugins after install:"
           sf plugins || true
 
       - name: Authenticate to Salesforce
         env:
           SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
         run: |
+          set -euo pipefail
+          if [ -z "${SFDX_AUTH_URL:-}" ]; then
+            echo "SFDX_AUTH_URL secret is not set. Aborting."
+            exit 1
+          fi
           echo "$SFDX_AUTH_URL" > sfdx_auth.txt
           chmod 600 sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
-      - name: Run Apex All Tests with Coverage Check
+      - name: Run Apex All Tests with Coverage Check (PR and push)
         run: |
+          set -euo pipefail
           sf apex run test \
             --test-level RunLocalTests \
             --result-format human \
@@ -54,9 +71,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # determine base ref
+          # Determine base ref: PR -> pull_request.base.sha, push -> HEAD~1
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             BASE_REF="${{ github.event.pull_request.base.sha }}"
+            if [ -z "${BASE_REF}" ]; then
+              echo "PR base sha is empty. Aborting."
+              exit 1
+            fi
           else
             BASE_REF="$(git rev-parse --verify HEAD~1)"
           fi
@@ -70,21 +91,34 @@ jobs:
             exit 0
           fi
 
-          # Fallback 1: try to use sgd binary if already installed globally
+          # Fallback 1: use global sgd binary if present
           if command -v sgd > /dev/null 2>&1; then
             echo "Using global sgd binary to generate delta..."
             sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
             exit 0
           fi
 
-          # Fallback 2: install sfdx-git-delta globally and use sgd binary (avoid npx)
+          # Fallback 2: install sfdx-git-delta globally with retries and use sgd
           echo "sf sgd not available. Installing sfdx-git-delta globally as fallback..."
-          npm install -g sfdx-git-delta@latest
+          for i in 1 2 3; do
+            npm install -g sfdx-git-delta@latest && break || {
+              echo "npm install attempt $i failed, retrying in 5s..."
+              sleep 5
+            }
+          done
+
           if command -v sgd > /dev/null 2>&1; then
             echo "Running sgd (global) to generate delta..."
             sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
           else
-            echo "ERROR: sgd binary not found after global install. Aborting."
+            echo "ERROR: sgd binary not found after global install. Printing diagnostics:"
+            echo "npm global bin:"
+            npm bin -g || true
+            echo "ls of npm global bin:"
+            ls -la "$(npm bin -g)" || true
+            echo "sf version and plugins:"
+            sf --version || true
+            sf plugins || true
             exit 1
           fi
 
@@ -95,6 +129,32 @@ jobs:
           echo "=== recursive listing ==="
           ls -R output || true
 
+      - name: Upload delta output artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: delta-output
+          path: output
+
+      - name: Upload npm logs (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-logs
+          path: /home/runner/.npm/_logs/*.log
+
+      - name: Debug info (sf version & plugins)
+        if: failure()
+        run: |
+          echo "=== sf version ==="
+          sf --version || true
+          echo "=== sf plugins ==="
+          sf plugins || true
+          echo "=== node & npm ==="
+          node --version || true
+          npm --version || true
+          echo "=== env vars (selected) ==="
+          echo "GITHUB_EVENT_NAME=${GITHUB_EVENT_NAME:-}" || true
+
       - name: Deploy Delta to Salesforce
         if: github.event_name == 'push' && success()
         run: |
@@ -104,6 +164,7 @@ jobs:
             exit 1
           fi
 
+          echo "Deploying from output/ to Salesforce..."
           sf project deploy start \
             --source-dir output \
             --test-level RunLocalTests \

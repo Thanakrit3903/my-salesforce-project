@@ -1,4 +1,4 @@
-name: Salesforce CI-CD (Smart Selective Deploy)
+name: Salesforce CI-CD (Professional Selective Deploy)
 
 on:
   push:
@@ -9,11 +9,12 @@ on:
 jobs:
   validate-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # สำคัญมากเพื่อให้ Git คำนวณความแตกต่างได้
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -30,57 +31,66 @@ jobs:
           echo "$SFDX_AUTH_URL" > sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
-      # --- ขั้นตอนค้นหาไฟล์ที่เปลี่ยน และ คลาสเทสที่ต้องรัน ---
-      - name: Identify Changed Files and Tests
+      # --- ขั้นตอนค้นหาไฟล์ที่เปลี่ยน และ คลาสเทสแบบตัดตัวซ้ำ ---
+      - name: Identify Changed Files and Unique Tests
         id: changed-assets
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             DIFF_BASE="${{ github.event.pull_request.base.sha }}"
           else
-            DIFF_BASE=$(git rev-parse HEAD~1)
+            # ป้องกันกรณี Push ครั้งแรกแล้วไม่มี HEAD~1
+            DIFF_BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
           fi
           
-          # 1. หาไฟล์ที่เปลี่ยน (เพื่อ Deploy)
+          echo "Comparing $DIFF_BASE with HEAD"
+          
+          # 1. หาไฟล์ที่เปลี่ยน (เฉพาะใน force-app) เพื่อใช้ในการ Deploy
           CHANGED_FILES=$(git diff --name-only "$DIFF_BASE" HEAD | grep '^force-app/' | xargs echo)
           echo "changed_files=$CHANGED_FILES" >> $GITHUB_ENV
           
-          # 2. หาชื่อ Class ที่เปลี่ยนเพื่อระบุ Test (เอาเฉพาะ .cls และตัดคำว่า Test ออกเพื่อหาคู่ของมัน)
-          # เช่นถ้าแก้ AccountService.cls จะรัน AccountServiceTest
-          TEST_CLASSES=$(git diff --name-only "$DIFF_BASE" HEAD | grep '\.cls$' | grep -v 'Test\.cls' | sed 's/.*\///;s/\.cls//' | sed 's/$/Test/' | xargs | sed 's/ /,/g')
-          
-          # 3. ถ้าแก้ไฟล์ Test ตรงๆ ก็ให้รันตัวมันเองด้วย
-          DIRECT_TESTS=$(git diff --name-only "$DIFF_BASE" HEAD | grep 'Test\.cls' | sed 's/.*\///;s/\.cls//' | xargs | sed 's/ /,/g')
-          
-          # รวมรายชื่อ Test ทั้งหมด
-          ALL_TESTS=$(echo "$TEST_CLASSES,$DIRECT_TESTS" | sed 's/^,//;s/,$//;s/,,/,/g')
-          
-          echo "Changed files to deploy: $CHANGED_FILES"
-          echo "Tests to run: $ALL_TESTS"
-          echo "test_classes=$ALL_TESTS" >> $GITHUB_ENV
+          # 2. ค้นหาชื่อ Test Classes แบบฉลาด (ตัดตัวซ้ำและ Normalize ชื่อ)
+          # แก้ปัญหาแก้ทั้ง Logic และ Test พร้อมกันแล้วชื่อซ้ำ
+          UNIQUE_TESTS=$(git diff --name-only "$DIFF_BASE" HEAD | grep '\.cls$' | \
+            sed 's/.*\///;s/\.cls//' | \
+            sed 's/Test$//' | sed 's/$/Test/' | \
+            sort -u | xargs echo)
 
-      # --- รัน Test เฉพาะตัวที่เกี่ยวข้อง และเช็ค Coverage 75% ---
-      - name: Run Selective Tests
+          echo "Tests to run: $UNIQUE_TESTS"
+          echo "test_classes=$UNIQUE_TESTS" >> $GITHUB_ENV
+
+      # --- ขั้นตอนรัน Test (เฉพาะถ้ามีคลาสถูกแก้) ---
+      - name: Run Selective Apex Tests
         if: env.test_classes != ''
         run: |
-          # รันเทสแบบระบุชื่อคลาส และต้องการผลลัพธ์เป็น JSON เพื่อเช็ค Coverage
           sf apex run test \
             --tests ${{ env.test_classes }} \
             --result-format human \
             --code-coverage \
             --wait 30 \
             --detailed-coverage
-          
-          # หมายเหตุ: Salesforce จะสั่ง Fail อัตโนมัติถ้า Test ไม่ผ่าน 
-          # ส่วนเรื่อง 75% ระบบ Deploy จะเช็คต่อในขั้นตอนถัดไป
 
-      # --- Deploy (หรือ Validate) เฉพาะไฟล์ที่แก้ ---
+      # --- ขั้นตอน Deploy (จะบังคับ 75% Coverage อัตโนมัติด้วย RunSpecifiedTests) ---
       - name: Deploy Selective Source
         if: env.changed_files != ''
         run: |
-          # ใช้ --test-level RunSpecifiedTests เพื่อประหยัดเวลา
-          # และ Salesforce จะบังคับให้ผ่าน 75% ของไฟล์ที่ส่งไปโดยอัตโนมัติ
-          sf project deploy start \
-            --source-dir ${{ env.changed_files }} \
-            --test-level RunSpecifiedTests \
-            --tests ${{ env.test_classes }} \
-            --wait 30
+          # ถ้ามีเทสให้รัน ใช้ RunSpecifiedTests
+          # ถ้าไม่มีเทส (เช่นแก้แค่ Layout/Label) ให้ใช้ NoTestRun
+          if [ -n "${{ env.test_classes }}" ]; then
+            sf project deploy start \
+              --source-dir ${{ env.changed_files }} \
+              --test-level RunSpecifiedTests \
+              --tests ${{ env.test_classes }} \
+              --wait 30
+          else
+            sf project deploy start \
+              --source-dir ${{ env.changed_files }} \
+              --test-level NoTestRun \
+              --wait 30
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Deployment Task Finished."
+          echo "Files: ${{ env.changed_files }}"
+          echo "Tests: ${{ env.test_classes }}"

@@ -16,26 +16,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Node.js
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: Install Salesforce CLI
         run: npm install @salesforce/cli --global
 
       - name: Verify sf binary and plugins (debug)
         run: |
-          echo "sf version and path"
+          echo "=== sf version & path ==="
           sf --version || true
-          which sf || whereis sf || true
-          echo "sf plugins list"
+          command -v sf || true
+          echo "=== sf plugins list ==="
           sf plugins || true
 
       - name: Install sfdx-git-delta plugin for sf (primary)
         run: |
           set -euo pipefail
-          # install plugin for sf; ignore error if already installed
           sf plugins install sfdx-git-delta@latest || true
           echo "sf plugins after install:"
           sf plugins || true
@@ -65,7 +64,7 @@ jobs:
       - name: Prepare output folder
         run: mkdir -p output
 
-      - name: Generate Delta Package (use sf sgd, fallback to global sgd)
+      - name: Generate Delta Package (use sf sgd, fallback to local sfdx-git-delta)
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -91,31 +90,24 @@ jobs:
             exit 0
           fi
 
-          # Fallback 1: use global sgd binary if present
-          if command -v sgd > /dev/null 2>&1; then
-            echo "Using global sgd binary to generate delta..."
-            sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
-            exit 0
-          fi
+          # Fallback: install sfdx-git-delta locally and run the binary from node_modules
+          echo "sf sgd not available. Installing sfdx-git-delta locally as fallback..."
+          # install locally (no save) so binary is available at ./node_modules/.bin/sgd
+          npm install sfdx-git-delta@latest --no-save
 
-          # Fallback 2: install sfdx-git-delta globally with retries and use sgd
-          echo "sf sgd not available. Installing sfdx-git-delta globally as fallback..."
-          for i in 1 2 3; do
-            npm install -g sfdx-git-delta@latest && break || {
-              echo "npm install attempt $i failed, retrying in 5s..."
-              sleep 5
-            }
-          done
+          # ensure local bin is in PATH for this step
+          export PATH="$PWD/node_modules/.bin:$PATH"
 
           if command -v sgd > /dev/null 2>&1; then
-            echo "Running sgd (global) to generate delta..."
+            echo "Running local sgd to generate delta..."
             sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
           else
-            echo "ERROR: sgd binary not found after global install. Printing diagnostics:"
-            echo "npm global bin:"
-            npm bin -g || true
-            echo "ls of npm global bin:"
-            ls -la "$(npm bin -g)" || true
+            echo "ERROR: sgd binary not found after local install. Printing diagnostics:"
+            echo "Node version: $(node --version || true)"
+            echo "NPM version: $(npm --version || true)"
+            echo "npm root -g: $(npm root -g || true)"
+            echo "ls node_modules/.bin:"
+            ls -la ./node_modules/.bin || true
             echo "sf version and plugins:"
             sf --version || true
             sf plugins || true
@@ -142,7 +134,7 @@ jobs:
           name: npm-logs
           path: /home/runner/.npm/_logs/*.log
 
-      - name: Debug info (sf version & plugins)
+      - name: Debug info (sf version & plugins) on failure
         if: failure()
         run: |
           echo "=== sf version ==="
@@ -152,8 +144,6 @@ jobs:
           echo "=== node & npm ==="
           node --version || true
           npm --version || true
-          echo "=== env vars (selected) ==="
-          echo "GITHUB_EVENT_NAME=${GITHUB_EVENT_NAME:-}" || true
 
       - name: Deploy Delta to Salesforce
         if: github.event_name == 'push' && success()

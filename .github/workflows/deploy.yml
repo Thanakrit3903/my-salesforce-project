@@ -24,19 +24,20 @@ jobs:
       - name: Install Salesforce CLI
         run: npm install @salesforce/cli --global
 
-      - name: Verify sf binary and plugins (debug)
+      - name: Debug sf binary and plugins
         run: |
           echo "=== sf version & path ==="
           sf --version || true
           command -v sf || true
-          echo "=== sf plugins list ==="
+          echo "=== sf plugins (before) ==="
           sf plugins || true
 
       - name: Install sfdx-git-delta plugin for sf (primary)
         run: |
           set -euo pipefail
+          # ติดตั้ง plugin ให้ sf (ไม่ให้ล้ม workflow ถ้าติดตั้งแล้ว)
           sf plugins install sfdx-git-delta@latest || true
-          echo "sf plugins after install:"
+          echo "=== sf plugins (after install) ==="
           sf plugins || true
 
       - name: Authenticate to Salesforce
@@ -64,13 +65,13 @@ jobs:
       - name: Prepare output folder
         run: mkdir -p output
 
-      - name: Generate Delta Package (use sf sgd, fallback to local sfdx-git-delta)
+      - name: Generate Delta Package (sf sgd -> npx sfdx-git-delta -> local install)
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          # Determine base ref: PR -> pull_request.base.sha, push -> HEAD~1
+          # determine base ref
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             BASE_REF="${{ github.event.pull_request.base.sha }}"
             if [ -z "${BASE_REF}" ]; then
@@ -83,36 +84,58 @@ jobs:
 
           echo "Generating delta from $BASE_REF to HEAD into output/"
 
-          # Primary: use sf sgd if available
+          # 1) Primary: use sf sgd if available
           if sf sgd source delta --help > /dev/null 2>&1; then
             echo "Using sf sgd (plugin) to generate delta..."
             sf sgd source delta --from "$BASE_REF" --to HEAD --output-dir output --generate-delta
             exit 0
           fi
 
-          # Fallback: install sfdx-git-delta locally and run the binary from node_modules
-          echo "sf sgd not available. Installing sfdx-git-delta locally as fallback..."
-          # install locally (no save) so binary is available at ./node_modules/.bin/sgd
+          # 2) Fallback: try npx sfdx-git-delta (call package by name)
+          echo "sf sgd not available. Trying npx sfdx-git-delta..."
+          if npx --yes sfdx-git-delta --help > /dev/null 2>&1; then
+            echo "Running npx sfdx-git-delta to generate delta..."
+            npx --yes sfdx-git-delta --from "$BASE_REF" --to HEAD --output output --generate-delta
+            exit 0
+          else
+            echo "npx sfdx-git-delta not usable or failed. Will try local install."
+          fi
+
+          # 3) Fallback: install locally and run binary from node_modules/.bin
+          echo "Installing sfdx-git-delta locally..."
           npm install sfdx-git-delta@latest --no-save
 
-          # ensure local bin is in PATH for this step
+          # ensure local bin is in PATH
           export PATH="$PWD/node_modules/.bin:$PATH"
 
+          echo "Listing node_modules/.bin:"
+          ls -la ./node_modules/.bin || true
+
+          # try both possible binary names
           if command -v sgd > /dev/null 2>&1; then
-            echo "Running local sgd to generate delta..."
+            echo "Found sgd in PATH, running sgd..."
             sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
-          else
-            echo "ERROR: sgd binary not found after local install. Printing diagnostics:"
-            echo "Node version: $(node --version || true)"
-            echo "NPM version: $(npm --version || true)"
-            echo "npm root -g: $(npm root -g || true)"
-            echo "ls node_modules/.bin:"
-            ls -la ./node_modules/.bin || true
-            echo "sf version and plugins:"
-            sf --version || true
-            sf plugins || true
-            exit 1
+            exit 0
           fi
+
+          if command -v sfdx-git-delta > /dev/null 2>&1; then
+            echo "Found sfdx-git-delta in PATH, running sfdx-git-delta..."
+            sfdx-git-delta --from "$BASE_REF" --to HEAD --output output --generate-delta
+            exit 0
+          fi
+
+          # If still not found, print diagnostics and fail
+          echo "ERROR: sgd / sfdx-git-delta binary not found after local install. Diagnostics:"
+          echo "Node version: $(node --version || true)"
+          echo "NPM version: $(npm --version || true)"
+          echo "ls node_modules/.bin:"
+          ls -la ./node_modules/.bin || true
+          echo "npm list sfdx-git-delta (local):"
+          npm list sfdx-git-delta || true
+          echo "sf version and plugins:"
+          sf --version || true
+          sf plugins || true
+          exit 1
 
       - name: Inspect delta output
         run: |

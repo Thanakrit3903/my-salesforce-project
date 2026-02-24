@@ -10,27 +10,33 @@ jobs:
   validate-and-deploy:
     runs-on: ubuntu-latest
     steps:
+      # 1. ดึง Code จาก GitHub (fetch full history เพื่อให้ HEAD~1 ใช้ได้)
       - name: Checkout source code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
+      # 2. ติดตั้ง Node และ Salesforce CLI
       - name: Install Salesforce CLI
         run: npm install @salesforce/cli --global
 
+      # 3. ติดตั้ง sfdx-git-delta plugin ให้กับ sf (ไม่ให้ล้ม workflow ถ้าติดตั้งแล้ว)
       - name: Install sfdx-git-delta plugin
         run: |
-          # ติดตั้ง plugin กับ sf; ถ้าล้มเหลวให้ยังไม่หยุด workflow
+          set -e
           sf plugins install sfdx-git-delta@latest || true
 
+      # 4. Authenticate to Salesforce (จาก secret SFDX_AUTH_URL)
       - name: Authenticate to Salesforce
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
         run: |
-          echo "${{ secrets.SFDX_AUTH_URL }}" > sfdx_auth.txt
+          echo "$SFDX_AUTH_URL" > sfdx_auth.txt
           chmod 600 sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
+      # 5. รัน Apex Tests (ทั้ง PR และ push จะรัน)
       - name: Run Apex All Tests with Coverage Check
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
         run: |
           sf apex run test \
             --test-level RunLocalTests \
@@ -38,40 +44,55 @@ jobs:
             --code-coverage \
             --wait 30
 
-      - name: Prepare delta folder
+      # 6. เตรียมโฟลเดอร์ผลลัพธ์ (output) เพื่อให้ sgd เขียนลงได้
+      - name: Prepare output folder
         run: mkdir -p output
 
-      - name: Generate Delta Package using sgd
+      # 7. สร้าง Delta (ใช้ sf sgd เป็นหลัก, fallback เป็น npx sfdx-git-delta)
+      - name: Generate Delta Package
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
-          # ใช้ commit SHA ของ base ถ้าเป็น PR ให้เปรียบเทียบกับ base branch
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          set -euo pipefail
+
+          # เลือก base ref: ถ้าเป็น PR ให้ใช้ base.sha ของ PR, ถ้าเป็น push ให้ใช้ HEAD~1
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             BASE_REF="${{ github.event.pull_request.base.sha }}"
           else
-            # ถ้าเป็น push เปรียบเทียบกับ HEAD~1
             BASE_REF="$(git rev-parse --verify HEAD~1)"
           fi
 
           echo "Generating delta from $BASE_REF to HEAD into output/"
-          # พยายามใช้ sf sgd ก่อน ถ้าไม่สำเร็จให้ fallback ไปใช้ npx sgd
+
+          # ถ้า sf sgd มีอยู่ ให้ใช้ sf sgd
           if sf sgd source delta --help > /dev/null 2>&1; then
             sf sgd source delta --from "$BASE_REF" --to HEAD --output-dir output --generate-delta
           else
-            # npx อาจเจอปัญหา permission บนบาง runner แต่เป็น fallback
-            npx sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
+            # fallback: ใช้ npx กับชื่อแพ็กเกจที่ถูกต้อง
+            npx sfdx-git-delta --from "$BASE_REF" --to HEAD --output output --generate-delta
           fi
 
+      # 8. ตรวจสอบเนื้อหาใน output
       - name: Inspect delta output
-        run: ls -R output || true
+        run: |
+          echo "=== output contents ==="
+          ls -la output || true
+          echo "=== recursive listing ==="
+          ls -R output || true
 
+      # 9. Deploy เฉพาะเมื่อเป็น push และขั้นตอนก่อนหน้าสำเร็จ
       - name: Deploy Delta to Salesforce
         if: github.event_name == 'push' && success()
         run: |
-          # ถ้า output ว่าง ให้หยุดและแสดงข้อความ
-          if [ -z "$(ls -A output 2>/dev/null)" ]; then
+          set -euo pipefail
+
+          # ถ้า output ว่าง ให้หยุด
+          if [ -z "$(ls -A output 2>/dev/null || true)" ]; then
             echo "No delta content found in output. Aborting deploy."
             exit 1
           fi
 
+          # Deploy จาก output (SFDX source format)
           sf project deploy start \
             --source-dir output \
             --test-level RunLocalTests \

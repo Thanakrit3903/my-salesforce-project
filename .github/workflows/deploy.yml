@@ -1,0 +1,41 @@
+name: Salesforce CI-CD
+
+on:
+  push:
+    branches: [ main ] # Deploy เมื่อ push ลง main
+  pull_request:
+    branches: [ main ] # รัน Test เมื่อมีคนเปิด PR เพื่อตรวจสอบก่อนรวมเข้า main
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. ดึง Code จาก GitHub
+      - name: Checkout source code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # 2. ติดตั้ง Salesforce CLI
+      - name: Install Salesforce CLI
+        run: npm install @salesforce/cli --global
+
+      # 3. Login เข้า Salesforce โดยใช้กุญแจที่เราเก็บไว้ใน Secrets
+      - name: Authenticate to Salesforce
+        run: |
+          echo "${{ secrets.SFDX_AUTH_URL }}" > sfdx_auth.txt
+          sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default-target
+
+      # 4. ขั้นตอนการรัน Test และ Validate (จำลองการ Deploy)
+      - name: Validate and Run Tests
+        run: |
+          sf project deploy validate \
+            --source-dir force-app \
+            --test-level RunLocalTests \
+            --wait 30
+      
+      # 5. สั่ง Deploy จริง (จะทำงานเฉพาะตอนที่ Push เข้า Main เท่านั้น)
+      - name: Deploy to Salesforce
+        if: github.event_name == 'push'
+        run: |
+          sf project deploy quick --wait 30

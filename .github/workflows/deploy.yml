@@ -52,11 +52,11 @@ jobs:
           
           echo "Comparing $BASE_REF to HEAD"
 
-          # 1. ติดตั้ง plugin แบบระบุชื่อให้ชัดเจนลงในโปรเจกต์ชั่วคราว
+          # ติดตั้ง sfdx-git-delta
           npm install sfdx-git-delta@latest
 
-          # 2. เรียกใช้โดยระบุ Path ตรงๆ ไปที่ node_modules (ตัดปัญหา npx หาไม่เจอ)
-          ./node_modules/.bin/sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
+          # เรียกใช้ sgd ผ่าน npx
+          npx sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
           
       - name: Inspect Delta Results
         run: |

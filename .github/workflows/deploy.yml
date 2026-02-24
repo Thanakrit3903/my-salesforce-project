@@ -53,10 +53,10 @@ jobs:
           echo "Comparing $BASE_REF to HEAD"
 
           # ติดตั้ง sfdx-git-delta
-          npm install sfdx-git-delta@latest
+          npm install --save-dev sfdx-git-delta@latest
 
-          # เรียกใช้ sgd ผ่าน npx
-          npx sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
+          # เรียกใช้ด้วย npx
+          npx sfdx-git-delta --from "$BASE_REF" --to HEAD --output output --generate-delta
           
       - name: Inspect Delta Results
         run: |

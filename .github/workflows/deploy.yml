@@ -43,20 +43,21 @@ jobs:
         run: |
           mkdir -p output
           
-          # ตรวจสอบจุดอ้างอิง (Base Ref)
+          # หาจุดตัดของ Commit
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE_REF="${{ github.event.pull_request.base.sha }}"
           else
-            # ถ้าเป็น Push เข้า main ให้เทียบกับ commit ก่อนหน้า
             BASE_REF=$(git rev-parse HEAD~1)
           fi
           
           echo "Comparing $BASE_REF to HEAD"
-          
-          # ใช้ npx เรียก sfdx-git-delta โดยตรง (ไม่ต้องติดตั้ง plugin ลงใน sf ให้วุ่นวาย)
-          # วิธีนี้เสถียรที่สุดใน GitHub Actions
-          npx sfdx-git-delta --from "$BASE_REF" --to HEAD --output output --generate-delta
 
+          # 1. ติดตั้ง plugin แบบระบุชื่อให้ชัดเจนลงในโปรเจกต์ชั่วคราว
+          npm install sfdx-git-delta@latest
+
+          # 2. เรียกใช้โดยระบุ Path ตรงๆ ไปที่ node_modules (ตัดปัญหา npx หาไม่เจอ)
+          ./node_modules/.bin/sgd --from "$BASE_REF" --to HEAD --output output --generate-delta
+          
       - name: Inspect Delta Results
         run: |
           echo "=== Delta package.xml ==="

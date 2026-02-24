@@ -24,7 +24,8 @@ jobs:
       - name: Authenticate to Salesforce
         run: |
           echo "${{ secrets.SFDX_AUTH_URL }}" > sfdx_auth.txt
-          sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default-target
+          chmod 600 sfdx_auth.txt
+          sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
       # 4. ขั้นตอนการรัน Test และ Validate (จำลองการ Deploy)
       - name: Validate and Run Tests

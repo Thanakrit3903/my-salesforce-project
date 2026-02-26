@@ -1,4 +1,4 @@
-name: Salesforce CI-CD (Professional Selective Deploy)
+name: Salesforce CI-CD (Delta & Selective Deploy)
 
 on:
   push:
@@ -14,15 +14,17 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # สำคัญมากเพื่อให้ Git คำนวณความแตกต่างได้
+          fetch-depth: 0 # ต้องใช้ 0 เพื่อให้ SGD คำนวณความต่างได้
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install Salesforce CLI
-        run: npm install @salesforce/cli --global
+      - name: Install Salesforce CLI & SGD Plugin
+        run: |
+          npm install @salesforce/cli --global
+          echo y | sf plugins install sfdx-git-delta
 
       - name: Authenticate to Salesforce
         env:
@@ -31,66 +33,53 @@ jobs:
           echo "$SFDX_AUTH_URL" > sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
-      # --- ขั้นตอนค้นหาไฟล์ที่เปลี่ยน และ คลาสเทสแบบตัดตัวซ้ำ ---
-      - name: Identify Changed Files and Unique Tests
-        id: changed-assets
+      # --- ขั้นตอนสร้าง Delta Package (สร้างส่วนต่าง + ตัวลบ) ---
+      - name: Create Delta Manifest
         run: |
+          mkdir delta
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            DIFF_BASE="${{ github.event.pull_request.base.sha }}"
+            # เทียบ PR กับกิ่งปลายทาง
+            sf sgd source delta --to HEAD --from origin/${{ github.base_ref }} --output delta/ --generate-delta
           else
-            # ป้องกันกรณี Push ครั้งแรกแล้วไม่มี HEAD~1
-            DIFF_BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+            # เทียบ Push กับ Commit ก่อนหน้า (รองรับเคส Push ครั้งแรก)
+            FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+            sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
           fi
-          
-          echo "Comparing $DIFF_BASE with HEAD"
-          
-          # 1. หาไฟล์ที่เปลี่ยน (เฉพาะใน force-app) เพื่อใช้ในการ Deploy
-          CHANGED_FILES=$(git diff --name-only "$DIFF_BASE" HEAD | grep '^force-app/' | xargs echo)
-          echo "changed_files=$CHANGED_FILES" >> $GITHUB_ENV
-          
-          # 2. ค้นหาชื่อ Test Classes แบบฉลาด (ตัดตัวซ้ำและ Normalize ชื่อ)
-          # แก้ปัญหาแก้ทั้ง Logic และ Test พร้อมกันแล้วชื่อซ้ำ
-          UNIQUE_TESTS=$(git diff --name-only "$DIFF_BASE" HEAD | grep '\.cls$' | \
-            sed 's/.*\///;s/\.cls//' | \
-            sed 's/Test$//' | sed 's/$/Test/' | \
-            sort -u | xargs echo)
 
-          echo "Tests to run: $UNIQUE_TESTS"
-          echo "test_classes=$UNIQUE_TESTS" >> $GITHUB_ENV
-
-      # --- ขั้นตอนรัน Test (เฉพาะถ้ามีคลาสถูกแก้) ---
-      - name: Run Selective Apex Tests
-        if: env.test_classes != ''
+      # --- ขั้นตอนหาชื่อ Test Classes (ปรับให้ Clean ขึ้น) ---
+      - name: Identify Unique Tests
+        id: tests
         run: |
-          sf apex run test \
-            --tests ${{ env.test_classes }} \
-            --result-format human \
-            --code-coverage \
-            --wait 30 \
-            --detailed-coverage
+          # หาไฟล์ .cls ที่เปลี่ยน แล้วเติม Test ต่อท้าย (ตัดตัวซ้ำ)
+          # และลบคำว่า Test ที่ติดมาออกก่อนเพื่อให้แน่ใจว่าชื่อไม่ซ้ำซ้อน
+          TESTS=$(git diff --name-only ${{ github.event.before || 'HEAD~1' }} HEAD | grep '\.cls$' | \
+            sed 's/.*\///;s/\.cls//' | sed 's/Test$//' | sed 's/$/Test/' | \
+            sort -u | xargs echo | sed 's/ /,/g')
+          
+          echo "test_classes=$TESTS" >> $GITHUB_ENV
+          echo "Found Tests: $TESTS"
 
-      # --- ขั้นตอน Deploy (จะบังคับ 75% Coverage อัตโนมัติด้วย RunSpecifiedTests) ---
+      # --- ขั้นตอน Deploy (ใช้ Manifest จะปลอดภัยกว่า) ---
       - name: Deploy Selective Source
-        if: env.changed_files != ''
+        # รันเฉพาะถ้ามีไฟล์เปลี่ยนใน package.xml (สร้าง/แก้) หรือมีใน destructiveChanges.xml (ลบ)
+        if: hashFiles('delta/package/package.xml') != '' || hashFiles('delta/destructiveChanges/destructiveChanges.xml') != ''
         run: |
-          # ถ้ามีเทสให้รัน ใช้ RunSpecifiedTests
-          # ถ้าไม่มีเทส (เช่นแก้แค่ Layout/Label) ให้ใช้ NoTestRun
+          DEPLOY_CMD="sf project deploy start \
+            --manifest delta/package/package.xml \
+            --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+            --wait 30"
+
           if [ -n "${{ env.test_classes }}" ]; then
-            sf project deploy start \
-              --source-dir ${{ env.changed_files }} \
-              --test-level RunSpecifiedTests \
-              --tests ${{ env.test_classes }} \
-              --wait 30
+            echo "Deploying with Specified Tests..."
+            $DEPLOY_CMD --test-level RunSpecifiedTests --tests ${{ env.test_classes }}
           else
-            sf project deploy start \
-              --source-dir ${{ env.changed_files }} \
-              --test-level NoTestRun \
-              --wait 30
+            echo "Deploying with No Test Run (No Apex changes)..."
+            $DEPLOY_CMD --test-level NoTestRun
           fi
 
       - name: Summary
         if: always()
         run: |
-          echo "Deployment Task Finished."
-          echo "Files: ${{ env.changed_files }}"
-          echo "Tests: ${{ env.test_classes }}"
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tests Run:** ${{ env.test_classes || 'None' }}" >> $GITHUB_STEP_SUMMARY
+          [ -f delta/package/package.xml ] && echo "- **Delta Manifest Created**" >> $GITHUB_STEP_SUMMARY || echo "- **No Changes Detected**" >> $GITHUB_STEP_SUMMARY

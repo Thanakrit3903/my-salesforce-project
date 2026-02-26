@@ -33,15 +33,13 @@ jobs:
           echo "$SFDX_AUTH_URL" > sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
-      # --- ขั้นตอนสร้าง Delta Package (สร้างส่วนต่าง + ตัวลบ) ---
+      # --- ขั้นตอนสร้าง Delta Package (ปรับปรุงจุดที่ Error) ---
       - name: Create Delta Manifest
         run: |
-          mkdir delta
+          mkdir -p delta  # เติม -p เพื่อบอกว่า "ถ้ามีอยู่แล้วก็ไม่ต้องทำอะไร ไม่ต้องแจ้ง Error"
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # เทียบ PR กับกิ่งปลายทาง
             sf sgd source delta --to HEAD --from origin/${{ github.base_ref }} --output delta/ --generate-delta
           else
-            # เทียบ Push กับ Commit ก่อนหน้า (รองรับเคส Push ครั้งแรก)
             FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
             sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
           fi

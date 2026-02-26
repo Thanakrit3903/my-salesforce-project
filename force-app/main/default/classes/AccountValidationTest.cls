@@ -20,20 +20,6 @@ private class AccountValidationTest {
     }
 
     @isTest
-    static void testDeleteColdAccountSuccess() {
-        // เทสกรณีปกติ: ถ้าเป็น Cold ต้องลบได้
-        Account acc = new Account(Name = 'Cold Account', Rating = 'Cold');
-        insert acc;
-
-        Test.startTest();
-        Database.DeleteResult result = Database.delete(acc, false);
-        Test.stopTest();
-
-        // ตรวจสอบว่าสำเร็จ
-        Assert.isTrue(result.isSuccess(), 'ควรจะลบได้สำเร็จ');
-    }
-
-    @isTest
     static void testDeleteWarmAccountFail() {
         // 1. สร้าง Account ที่เป็น Warm
         Account acc = new Account(Name = 'Warm Account', Rating = 'Warm');

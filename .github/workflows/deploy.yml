@@ -45,44 +45,46 @@ jobs:
             sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
           fi
 
-      # --- 2. หาชื่อ Test Classes ---
+      # --- 2. หาชื่อ Test Classes (ปรับให้ใช้เว้นวรรคแทนคอมมา) ---
       - name: Identify Unique Tests
         id: tests
         run: |
-          # ค้นหาไฟล์ .cls ที่มีการเปลี่ยนแปลง
+          # ค้นหาไฟล์ .cls ที่เปลี่ยน แล้วเติม Test ต่อท้าย
+          # ใช้ xargs echo เพื่อให้ชื่อคลาสคั่นด้วย "เว้นวรรค" (Space) แทนคอมมา
           TESTS=$(git diff --name-only ${{ github.event.before || 'HEAD~1' }} HEAD 2>/dev/null | grep '\.cls$' | \
             sed 's/.*\///;s/\.cls//' | sed 's/Test$//' | sed 's/$/Test/' | \
-            sort -u | xargs echo | sed 's/ /,/g')
+            sort -u | xargs echo)
           
           echo "test_classes=$TESTS" >> $GITHUB_ENV
           echo "Found Tests: $TESTS"
 
-      # --- 3. Deploy แบบฉลาด (ตรวจเช็คก่อนว่ามีของให้ลงไหม) ---
+      # --- 3. Deploy แบบฉลาด ---
       - name: Deploy Selective Source
         run: |
-          # ตรวจสอบว่าใน package.xml หรือ destructiveChanges.xml มีการระบุ Metadata จริงๆ หรือไม่
-          # โดยการเช็คว่ามีแท็ก <members> อยู่ในไฟล์ไหม
           HAS_CHANGES=false
           if [ -f "delta/package/package.xml" ] && grep -q "<members>" delta/package/package.xml; then HAS_CHANGES=true; fi
           if [ -f "delta/destructiveChanges/destructiveChanges.xml" ] && grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml; then HAS_CHANGES=true; fi
 
           if [ "$HAS_CHANGES" = "true" ]; then
-            echo "Detected metadata changes. Starting deployment..."
-            
-            DEPLOY_CMD="sf project deploy start \
-              --manifest delta/package/package.xml \
-              --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
-              --wait 30"
-
             if [ -n "${{ env.test_classes }}" ]; then
               echo "Running with Specified Tests: ${{ env.test_classes }}"
-              $DEPLOY_CMD --test-level RunSpecifiedTests --tests ${{ env.test_classes }}
+              # ไม่ต้องใส่เครื่องหมายคำพูดครอบ ${{ env.test_classes }} เพื่อให้ CLI มองเห็นเป็นหลาย arguments
+              sf project deploy start \
+                --manifest delta/package/package.xml \
+                --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+                --test-level RunSpecifiedTests \
+                --tests ${{ env.test_classes }} \
+                --wait 30
             else
               echo "No Apex changes. Running with NoTestRun."
-              $DEPLOY_CMD --test-level NoTestRun
+              sf project deploy start \
+                --manifest delta/package/package.xml \
+                --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+                --test-level NoTestRun \
+                --wait 30
             fi
           else
-            echo "No Salesforce metadata changes detected (Only non-Salesforce files changed). Skipping deploy to avoid Error."
+            echo "No Salesforce metadata changes detected. Skipping deploy."
           fi
 
       - name: Summary

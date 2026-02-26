@@ -33,46 +33,56 @@ jobs:
           echo "$SFDX_AUTH_URL" > sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
 
-      # --- ขั้นตอนสร้าง Delta Package (ปรับปรุงจุดที่ Error) ---
+      # --- 1. สร้าง Delta Package (เพิ่ม -p เพื่อกัน Error โฟลเดอร์ซ้ำ) ---
       - name: Create Delta Manifest
         run: |
-          mkdir -p delta  # เติม -p เพื่อบอกว่า "ถ้ามีอยู่แล้วก็ไม่ต้องทำอะไร ไม่ต้องแจ้ง Error"
+          mkdir -p delta
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             sf sgd source delta --to HEAD --from origin/${{ github.base_ref }} --output delta/ --generate-delta
           else
+            # รองรับกรณี Push ครั้งแรกที่ไม่มี HEAD~1
             FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
             sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
           fi
 
-      # --- ขั้นตอนหาชื่อ Test Classes (ปรับให้ Clean ขึ้น) ---
+      # --- 2. หาชื่อ Test Classes ---
       - name: Identify Unique Tests
         id: tests
         run: |
-          # หาไฟล์ .cls ที่เปลี่ยน แล้วเติม Test ต่อท้าย (ตัดตัวซ้ำ)
-          # และลบคำว่า Test ที่ติดมาออกก่อนเพื่อให้แน่ใจว่าชื่อไม่ซ้ำซ้อน
-          TESTS=$(git diff --name-only ${{ github.event.before || 'HEAD~1' }} HEAD | grep '\.cls$' | \
+          # ค้นหาไฟล์ .cls ที่มีการเปลี่ยนแปลง
+          TESTS=$(git diff --name-only ${{ github.event.before || 'HEAD~1' }} HEAD 2>/dev/null | grep '\.cls$' | \
             sed 's/.*\///;s/\.cls//' | sed 's/Test$//' | sed 's/$/Test/' | \
             sort -u | xargs echo | sed 's/ /,/g')
           
           echo "test_classes=$TESTS" >> $GITHUB_ENV
           echo "Found Tests: $TESTS"
 
-      # --- ขั้นตอน Deploy (ใช้ Manifest จะปลอดภัยกว่า) ---
+      # --- 3. Deploy แบบฉลาด (ตรวจเช็คก่อนว่ามีของให้ลงไหม) ---
       - name: Deploy Selective Source
-        # รันเฉพาะถ้ามีไฟล์เปลี่ยนใน package.xml (สร้าง/แก้) หรือมีใน destructiveChanges.xml (ลบ)
-        if: hashFiles('delta/package/package.xml') != '' || hashFiles('delta/destructiveChanges/destructiveChanges.xml') != ''
         run: |
-          DEPLOY_CMD="sf project deploy start \
-            --manifest delta/package/package.xml \
-            --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
-            --wait 30"
+          # ตรวจสอบว่าใน package.xml หรือ destructiveChanges.xml มีการระบุ Metadata จริงๆ หรือไม่
+          # โดยการเช็คว่ามีแท็ก <members> อยู่ในไฟล์ไหม
+          HAS_CHANGES=false
+          if [ -f "delta/package/package.xml" ] && grep -q "<members>" delta/package/package.xml; then HAS_CHANGES=true; fi
+          if [ -f "delta/destructiveChanges/destructiveChanges.xml" ] && grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml; then HAS_CHANGES=true; fi
 
-          if [ -n "${{ env.test_classes }}" ]; then
-            echo "Deploying with Specified Tests..."
-            $DEPLOY_CMD --test-level RunSpecifiedTests --tests ${{ env.test_classes }}
+          if [ "$HAS_CHANGES" = "true" ]; then
+            echo "Detected metadata changes. Starting deployment..."
+            
+            DEPLOY_CMD="sf project deploy start \
+              --manifest delta/package/package.xml \
+              --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+              --wait 30"
+
+            if [ -n "${{ env.test_classes }}" ]; then
+              echo "Running with Specified Tests: ${{ env.test_classes }}"
+              $DEPLOY_CMD --test-level RunSpecifiedTests --tests ${{ env.test_classes }}
+            else
+              echo "No Apex changes. Running with NoTestRun."
+              $DEPLOY_CMD --test-level NoTestRun
+            fi
           else
-            echo "Deploying with No Test Run (No Apex changes)..."
-            $DEPLOY_CMD --test-level NoTestRun
+            echo "No Salesforce metadata changes detected (Only non-Salesforce files changed). Skipping deploy to avoid Error."
           fi
 
       - name: Summary

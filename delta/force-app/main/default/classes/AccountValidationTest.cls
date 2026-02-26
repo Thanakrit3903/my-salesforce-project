@@ -20,16 +20,22 @@ private class AccountValidationTest {
     }
 
     @isTest
-    static void testDeleteColdAccountSuccess() {
-        // เทสกรณีปกติ: ถ้าเป็น Cold ต้องลบได้
-        Account acc = new Account(Name = 'Cold Account', Rating = 'Cold');
+    static void testDeleteWarmAccountFail() {
+        Account acc = new Account(Name = 'Warm Account', Rating = 'Warm');
         insert acc;
 
-        Test.startTest();
-        Database.DeleteResult result = Database.delete(acc, false);
-        Test.stopTest();
+        // --- เพิ่มส่วนนี้เพื่อ Debug ---
+        Account checkAcc = [SELECT Rating FROM Account WHERE Id = :acc.Id];
+        System.debug('Current Rating before delete: ' + checkAcc.Rating);
+        // ----------------------------
 
-        // ตรวจสอบว่าสำเร็จ
-        Assert.isTrue(result.isSuccess(), 'ควรจะลบได้สำเร็จ');
+        Test.startTest();
+        try {
+            delete acc;
+            Assert.fail('ควรจะพังที่บรรทัดนี้ เพราะ Rating คือ: ' + checkAcc.Rating);
+        } catch (DmlException e) {
+            Assert.isTrue(e.getMessage().contains('ไม่สามารถลบ Account นี้ได้'), 'Message ไม่ตรง: ' + e.getMessage());
+        }
+        Test.stopTest();
     }
 }

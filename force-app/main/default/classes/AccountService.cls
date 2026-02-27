@@ -6,6 +6,8 @@ public with sharing class AccountService {
                 acc.Rating = 'Hot';
             } else if (acc.Industry == 'Banking') {
                 acc.Rating = 'Cold';
+            } else if (acc.Industry == 'Chemicals') {
+                acc.Rating = 'Warm';
             }
         }
     }

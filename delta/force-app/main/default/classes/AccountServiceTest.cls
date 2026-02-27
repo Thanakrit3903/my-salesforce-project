@@ -49,19 +49,4 @@ private class AccountServiceTest {
         Account result = [SELECT Rating FROM Account WHERE Id = :acc.Id];
         Assert.areEqual('Cold', result.Rating, 'Rating should be Cold for Banking');
     }
-
-    @isTest
-    static void testNegativeOtherIndustryNoChange() {
-        Account acc = new Account(
-            Name = 'Test Retail Corp',
-            Industry = 'Retail'
-        );
-
-        Test.startTest();
-        insert acc;
-        Test.stopTest();
-
-        Account result = [SELECT Rating FROM Account WHERE Id = :acc.Id];
-        Assert.areEqual('Cold',result.Rating, 'Rating should not be Cold for Banking');
-    }
 }

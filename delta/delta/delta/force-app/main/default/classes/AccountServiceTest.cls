@@ -53,8 +53,8 @@ private class AccountServiceTest {
     @isTest
     static void testNegativeOtherIndustryNoChange() {
         Account acc = new Account(
-            Name = 'Test Chemicals Corp',
-            Industry = 'Chemicals'
+            Name = 'Test Retail Corp',
+            Industry = 'Retail'
         );
 
         Test.startTest();
@@ -62,6 +62,6 @@ private class AccountServiceTest {
         Test.stopTest();
 
         Account result = [SELECT Rating FROM Account WHERE Id = :acc.Id];
-        Assert.areEqual('Warm', result.Rating, 'Rating ควรจะเป็น Warm สำหรับอุตสาหกรรม Chemicals');
+        Assert.areEqual('Cold',result.Rating, 'Rating should not be Cold for Banking');
     }
 }

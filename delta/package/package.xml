@@ -2,6 +2,7 @@
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
     <types>
         <members>AccountServiceTest</members>
+        <members>AccountValidationHandler</members>
         <members>AccountValidationTest</members>
         <name>ApexClass</name>
     </types>

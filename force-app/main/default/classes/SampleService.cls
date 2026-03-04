@@ -3,3 +3,4 @@ public with sharing class SampleService {
         return 'Hello from CI/CD';
     }
 }
+// End of file

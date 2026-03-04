@@ -161,27 +161,59 @@ jobs:
       - name: Identify Unique Tests
         id: tests
         run: |
-          # ใช้ --diff-filter=AM เพื่อเอาเฉพาะไฟล์ที่ เพิ่ม(A) หรือ แก้ไข(M) ไม่เอาไฟล์ที่ถูกลบ
-          RANGE="${{ github.event.before || 'HEAD~1' }}"
-          [ "${{ github.event_name }}" = "pull_request" ] && RANGE="origin/${{ github.base_ref }}"
+          # 1. กำหนดช่วงการหา Diff ให้ยืดหยุ่น (รองรับทั้ง PR และ Push)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          else
+            # ถ้าเป็น Push แรกที่ไม่มี previous commit ให้เทียบกับตัวมันเอง
+            BEFORE_SHA="${{ github.event.before }}"
+            if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              RANGE="HEAD~1..HEAD"
+            else
+              RANGE="$BEFORE_SHA..${{ github.sha }}"
+            fi
+          fi
+
+          echo "🔍 Checking diff for range: $RANGE"
+
+          # 2. ดึงชื่อไฟล์ .cls ที่มีการเพิ่ม (A) หรือแก้ไข (M)
+          # ใช้ sed เพื่อดึงเฉพาะชื่อไฟล์ออกมาจาก Path เต็ม
+          CHANGED_FILES=$(git diff --diff-filter=AM --name-only $RANGE | grep '\.cls$' || true)
           
-          CHANGED_CLASSES=$(git diff --diff-filter=AM --name-only $RANGE HEAD | grep '\.cls$' | sed 's/.*\///;s/\.cls//' || true)
-          
+          echo "📝 Files changed: $CHANGED_FILES"
+
           FINAL_TESTS=""
-          for cls in $CHANGED_CLASSES; do
-            # ตรวจสอบ naming convention: [ClassName]Test.cls
-            # ค้นหาในโฟลเดอร์ force-app ว่ามีไฟล์เทสนี้อยู่จริงไหม
-            TEST_NAME="${cls%Test}Test"
-            if find force-app -name "${TEST_NAME}.cls" | grep -q .; then
-              FINAL_TESTS="$FINAL_TESTS $TEST_NAME"
+          for file_path in $CHANGED_FILES; do
+            # ดึงชื่อคลาสจาก path (เช่น force-app/.../SampleService.cls -> SampleService)
+            cls=$(basename "$file_path" .cls)
+            
+            # ถ้าไฟล์ที่เปลี่ยนเป็น Test อยู่แล้ว ให้ใช้ชื่อนั้นเลย
+            # ถ้าไม่ใช่ ให้ลองหาไฟล์ที่ลงท้ายด้วย Test
+            if [[ "$cls" == *Test ]]; then
+              TEST_NAME="$cls"
+            else
+              TEST_NAME="${cls}Test"
+            fi
+            
+            # 3. ค้นหาไฟล์ Test ในโปรเจกต์ (ใช้ -iname เพื่อไม่ให้พลาดเรื่องตัวพิมพ์เล็กใหญ่)
+            # ค้นหาไฟล์ที่มีชื่อตรงกับ TEST_NAME.cls
+            FOUND_PATH=$(find force-app -iname "${TEST_NAME}.cls" -print -quit)
+            
+            if [ -n "$FOUND_PATH" ]; then
+              # ดึงชื่อคลาสจริงๆ จากไฟล์ที่หาเจอ (ป้องกันเรื่อง Case Sensitive)
+              ACTUAL_TEST_NAME=$(basename "$FOUND_PATH" .cls)
+              echo "✅ Found matching test: $ACTUAL_TEST_NAME (at $FOUND_PATH)"
+              FINAL_TESTS="$FINAL_TESTS $ACTUAL_TEST_NAME"
+            else
+              echo "⚠️ Warning: No test file found for $cls (Looked for ${TEST_NAME}.cls)"
             fi
           done
 
-          # ทำความสะอาด String และลบตัวซ้ำ
+          # 4. กำจัดตัวซ้ำและบันทึกค่า
           CLEAN_TESTS=$(echo $FINAL_TESTS | xargs -n1 | sort -u | xargs)
           
           echo "test_classes=$CLEAN_TESTS" >> $GITHUB_ENV
-          echo "Found Valid Tests: $CLEAN_TESTS"
+          echo "🚀 FINAL_RESULT_TESTS: $CLEAN_TESTS"
 
       # --- 5. Deploy (ปรับปรุง: ยืดหยุ่นตามสภาพแวดล้อมและผลลัพธ์การหา Test) ---
       - name: Deploy Selective Source

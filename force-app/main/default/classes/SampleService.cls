@@ -1,5 +1,5 @@
 public with sharing class SampleService {
     public static String getGreeting() {
-        return 'Hello from CI/CD';
+        return 'Hello from CI/CDdsadasdasd';
     }
 }

@@ -152,7 +152,7 @@ jobs:
             sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
           fi
       # 3.1 Debug: แสดงไฟล์ที่อยู่ใน Delta Package เพื่อช่วยตรวจสอบ
-      - name: Debug: List Delta Files
+      - name: Debug List Delta Files
         run: |
           echo "--- Files in Delta Package ---"
           find delta -type f

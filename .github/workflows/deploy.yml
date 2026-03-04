@@ -144,6 +144,7 @@ jobs:
       # --- 3. สร้าง Delta Package ---
       - name: Create Delta Manifest
         run: |
+          rm -rf delta
           mkdir -p delta
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             sf sgd source delta --to HEAD --from origin/${{ github.base_ref }} --output delta/ --generate-delta

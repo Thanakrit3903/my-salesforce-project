@@ -151,6 +151,11 @@ jobs:
             FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
             sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
           fi
+      # 3.1 Debug: แสดงไฟล์ที่อยู่ใน Delta Package เพื่อช่วยตรวจสอบ
+      - name: Debug: List Delta Files
+        run: |
+          echo "--- Files in Delta Package ---"
+          find delta -type f
 
       # --- 4. หาชื่อ Test Classes (ปรับปรุง: เช็คไฟล์ที่มีอยู่จริง + กันไฟล์ที่ถูกลบ) ---
       - name: Identify Unique Tests

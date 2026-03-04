@@ -1,8 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">
     <apiVersion>65.0</apiVersion>
-    <description>Flow สำหรับทดสอบ CI/CD Pipeline</description>
+    <description>Flow สำหรับทดสอบ CI/CD Pipeline - Fixed version</description>
     <label>Test Autolaunched Flow</label>
     <processType>AutoLaunchedFlow</processType>
     <status>Active</status>
+
+    <variables>
+        <name>varTestInput</name>
+        <dataType>String</dataType>
+        <isCollection>false</isCollection>
+        <isInput>true</isInput>
+        <isOutput>false</isOutput>
+    </variables>
+
+    <assignments>
+        <name>Assign_Value</name>
+        <label>Assign Value</label>
+        <locationX>176</locationX>
+        <locationY>124</locationY>
+        <assignmentItems>
+            <assignToReference>varTestInput</assignToReference>
+            <operator>Assign</operator>
+            <value>
+                <stringValue>Success</stringValue>
+            </value>
+        </assignmentItems>
+    </assignments>
+
+    <start>
+        <locationX>50</locationX>
+        <locationY>50</locationY>
+        <connector>
+            <targetReference>Assign_Value</targetReference>
+        </connector>
+    </start>
 </Flow>

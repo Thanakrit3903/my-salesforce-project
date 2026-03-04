@@ -141,13 +141,22 @@ jobs:
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
           rm sfdx_auth.txt # ลบไฟล์ทิ้งทันทีเพื่อความปลอดภัย
 
+      # 2.1 อ่าน API Version จาก sfdx-project.json เพื่อให้สอดคล้องกับโปรเจกต์
+      - name: Read API Version from Project
+        id: project_version
+        run: |
+          # ใช้ jq ดึงค่าจาก sfdx-project.json
+          VERSION=$(jq -r '.sourceApiVersion' sfdx-project.json)
+          echo "SF_API_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "✅ Detected API Version from sfdx-project.json: $VERSION"
+
       # --- 3. สร้าง Delta Package ---
       - name: Create Delta Manifest
         run: |
           rm -rf delta
           mkdir -p delta
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            sf sgd source delta --to HEAD --from origin/${{ github.base_ref }} --output delta/ --generate-delta
+            sf sgd source delta --to HEAD --from origin/${{ github.base_ref }} --output delta/ --generate-delta --api-version ${{ env.SF_API_VERSION }}
           else
             FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
             sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
@@ -236,6 +245,7 @@ jobs:
               --manifest delta/package/package.xml \
               --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
               $DEPLOY_ARGS \
+              --api-version ${{ env.SF_API_VERSION }} \
               --wait 30
           else
             echo "No Salesforce metadata changes detected. Skipping deploy."

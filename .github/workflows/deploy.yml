@@ -116,7 +116,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm' # ช่วย Cache dependencies พื้นฐาน
 
       # --- 1. เพิ่ม Cache สำหรับ Salesforce CLI เพื่อลดเวลารันลง 1-2 นาที ---
       - name: Cache Salesforce CLI

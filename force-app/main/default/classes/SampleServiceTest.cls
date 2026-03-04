@@ -5,4 +5,3 @@ private class SampleServiceTest {
         System.assertEquals('Hello from CI/CD', SampleService.getGreeting());
     }
 }
-// End of file

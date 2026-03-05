@@ -1,259 +1,218 @@
-# name: Salesforce CI-CD (Delta & Selective Deploy)
-
-# on:
-#   push:
-#     branches: [ main ]
-#   pull_request:
-#     branches: [ main ]
-
-# jobs:
-#   validate-and-deploy:
-#     runs-on: ubuntu-latest
-#     timeout-minutes: 60
-#     steps:
-#       - name: Checkout source code
-#         uses: actions/checkout@v4
-#         with:
-#           fetch-depth: 0 # ต้องใช้ 0 เพื่อให้ SGD คำนวณความต่างได้
-
-#       - name: Set up Node.js
-#         uses: actions/setup-node@v4
-#         with:
-#           node-version: '20'
-
-#       - name: Install Salesforce CLI & SGD Plugin
-#         run: |
-#           npm install @salesforce/cli --global
-#           echo y | sf plugins install sfdx-git-delta
-
-#       - name: Authenticate to Salesforce
-#         env:
-#           SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
-#         run: |
-#           echo "$SFDX_AUTH_URL" > sfdx_auth.txt
-#           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
-
-#       # --- 1. สร้าง Delta Package (เพิ่ม -p เพื่อกัน Error โฟลเดอร์ซ้ำ) ---
-#       - name: Create Delta Manifest
-#         run: |
-#           mkdir -p delta
-#           if [ "${{ github.event_name }}" = "pull_request" ]; then
-#             sf sgd source delta --to HEAD --from origin/${{ github.base_ref }} --output delta/ --generate-delta
-#           else
-#             # รองรับกรณี Push ครั้งแรกที่ไม่มี HEAD~1
-#             FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
-#             sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
-#           fi
-
-#       # --- 2. หาชื่อ Test Classes (ปรับให้ใช้เว้นวรรคแทนคอมมา) ---
-#       - name: Identify Unique Tests
-#         id: tests
-#         run: |
-#           # ค้นหาไฟล์ .cls ที่เปลี่ยน แล้วเติม Test ต่อท้าย
-#           # ใช้ xargs echo เพื่อให้ชื่อคลาสคั่นด้วย "เว้นวรรค" (Space) แทนคอมมา
-#           TESTS=$(git diff --name-only ${{ github.event.before || 'HEAD~1' }} HEAD 2>/dev/null | grep '\.cls$' | \
-#             sed 's/.*\///;s/\.cls//' | sed 's/Test$//' | sed 's/$/Test/' | \
-#             sort -u | xargs echo)
-          
-#           echo "test_classes=$TESTS" >> $GITHUB_ENV
-#           echo "Found Tests: $TESTS"
-
-#       # --- 3. Deploy แบบฉลาด ---
-#       - name: Deploy Selective Source
-#         run: |
-#           HAS_CHANGES=false
-#           if [ -f "delta/package/package.xml" ] && grep -q "<members>" delta/package/package.xml; then HAS_CHANGES=true; fi
-#           if [ -f "delta/destructiveChanges/destructiveChanges.xml" ] && grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml; then HAS_CHANGES=true; fi
-
-#           if [ "$HAS_CHANGES" = "true" ]; then
-#             if [ -n "${{ env.test_classes }}" ]; then
-#               echo "Running with Specified Tests: ${{ env.test_classes }}"
-#               # ไม่ต้องใส่เครื่องหมายคำพูดครอบ ${{ env.test_classes }} เพื่อให้ CLI มองเห็นเป็นหลาย arguments
-#               sf project deploy start \
-#                 --manifest delta/package/package.xml \
-#                 --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
-#                 --test-level RunSpecifiedTests \
-#                 --tests ${{ env.test_classes }} \
-#                 --wait 30
-#             else
-#               echo "No Apex changes. Running with NoTestRun."
-#               sf project deploy start \
-#                 --manifest delta/package/package.xml \
-#                 --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
-#                 --test-level NoTestRun \
-#                 --wait 30
-#             fi
-#           else
-#             echo "No Salesforce metadata changes detected. Skipping deploy."
-#           fi
-
-#       - name: Summary
-#         if: always()
-#         run: |
-#           echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
-#           echo "- **Tests Run:** ${{ env.test_classes || 'None' }}" >> $GITHUB_STEP_SUMMARY
-#           [ -f delta/package/package.xml ] && echo "- **Delta Manifest Created**" >> $GITHUB_STEP_SUMMARY || echo "- **No Changes Detected**" >> $GITHUB_STEP_SUMMARY
-
-name: Salesforce CI-CD (Delta & Selective Deploy) - Optimized
-
+name: Salesforce Deploy Full System
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
-  validate-and-deploy:
+  Full_System_Deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout source code
+    steps: 
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # จำเป็นสำหรับการคำนวณ Delta
+          fetch-depth: 0 
 
-      - name: Set up Node.js
+      - name: Install Node & Salesforce CLI
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # --- 1. เพิ่ม Cache สำหรับ Salesforce CLI เพื่อลดเวลารันลง 1-2 นาที ---
-      - name: Cache Salesforce CLI
-        id: cache-sfdx
-        uses: actions/cache@v3
-        with:
-          path: /usr/local/lib/node_modules/@salesforce/cli
-          key: ${{ runner.os }}-sfdx-cli-v2
-
-      - name: Install Salesforce CLI & SGD Plugin
+      - name: Install Plugins
         run: |
-          if ! command -v sf &> /dev/null; then
-            sudo npm install @salesforce/cli --global
-          fi
-          echo y | sf plugins install sfdx-git-delta
-
-      # --- 2. Authenticate แบบปลอดภัย (ลบไฟล์ทันที) ---
-      - name: Authenticate to Salesforce
-        env:
-          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
+          npm install @salesforce/cli --global
+          echo 'y' | sf plugins install sfdx-git-delta
+        
+      - name: Salesforce Authen
         run: |
-          echo "$SFDX_AUTH_URL" > sfdx_auth.txt
-          sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
-          rm sfdx_auth.txt # ลบไฟล์ทิ้งทันทีเพื่อความปลอดภัย
+          echo "${{ secrets.P_KEY2 }}" >> private.key
+          sf org login jwt \
+            --client-id ${{ secrets.TOKEN }} \
+            --jwt-key-file "private.key" \
+            --username ${{ secrets.USER_NAME2 }} \
+            --alias my-org \
+            --instance-url https://login.salesforce.com
 
-      # 2.1 อ่าน API Version จาก sfdx-project.json เพื่อให้สอดคล้องกับโปรเจกต์
-      - name: Read API Version from Project
-        id: project_version
+      - name: Step 1 - Generate Delta (สร้างไฟล์ส่วนต่าง)
+        id: generate_delta
         run: |
-          # ใช้ jq ดึงค่าจาก sfdx-project.json
-          VERSION=$(jq -r '.sourceApiVersion' sfdx-project.json)
-          echo "SF_API_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "✅ Detected API Version from sfdx-project.json: $VERSION"
-
-      # --- 3. สร้าง Delta Package ---
-      - name: Create Delta Manifest
-        run: |
-          rm -rf delta
+          rm -rf delta 
           mkdir -p delta
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            sf sgd source delta --to HEAD --from origin/${{ github.base_ref }} --output delta/ --generate-delta --api-version ${{ env.SF_API_VERSION }}
-          else
-            FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
-            sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
-          fi
-      # 3.1 Debug: แสดงไฟล์ที่อยู่ใน Delta Package เพื่อช่วยตรวจสอบ
-      - name: Debug List Delta Files
-        run: |
-          echo "--- Files in Delta Package ---"
-          find delta -type f
-
-      # --- 4. หาชื่อ Test Classes (ปรับปรุง: เช็คไฟล์ที่มีอยู่จริง + กันไฟล์ที่ถูกลบ) ---
-      - name: Identify Unique Tests
-        id: tests
-        run: |
-          # 1. กำหนดช่วงการหา Diff ให้ยืดหยุ่น (รองรับทั้ง PR และ Push)
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            RANGE="origin/${{ github.base_ref }}...HEAD"
-          else
-            # ถ้าเป็น Push แรกที่ไม่มี previous commit ให้เทียบกับตัวมันเอง
-            BEFORE_SHA="${{ github.event.before }}"
-            if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-              RANGE="HEAD~1..HEAD"
-            else
-              RANGE="$BEFORE_SHA..${{ github.sha }}"
-            fi
-          fi
-
-          echo "🔍 Checking diff for range: $RANGE"
-
-          # 2. ดึงชื่อไฟล์ .cls ที่มีการเพิ่ม (A) หรือแก้ไข (M)
-          # ใช้ sed เพื่อดึงเฉพาะชื่อไฟล์ออกมาจาก Path เต็ม
-          CHANGED_FILES=$(git diff --diff-filter=AM --name-only $RANGE | grep '\.cls$' || true)
+          # 1. ดึง SHA ของจุดล่าสุดบน Server ก่อนที่จะมีการ Push ครั้งนี้
+          FROM_SHA=${{ github.event.before }}
           
-          echo "📝 Files changed: $CHANGED_FILES"
+          # 2. เช็คกรณีพิเศษ: ถ้าเป็น Branch ใหม่ หรือ Push ครั้งแรก SHA จะเป็นเลข 0 หมด
+          # ให้ถอยไปหาจุดเริ่มต้นของ Branch แทน (หรือใช้ HEAD~1 เป็นแผนสำรอง)
+          if [ "$FROM_SHA" = "0000000000000000000000000000000000000000" ] || [ -z "$FROM_SHA" ]; then
+            echo "First push or new branch detected. Falling back to HEAD~1"
+            FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          fi
+          
+          echo "Generating delta from $FROM_SHA to HEAD"
+          
+          # 3. สั่ง SGD โดยใช้ FROM_SHA ที่คำนวณมาแล้ว (จะกวาดมาครบทุก Commits ใน Push นั้น)
+          sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
 
-          FINAL_TESTS=""
-          for file_path in $CHANGED_FILES; do
-            # ดึงชื่อคลาสจาก path (เช่น force-app/.../SampleService.cls -> SampleService)
-            cls=$(basename "$file_path" .cls)
-            
-            # ถ้าไฟล์ที่เปลี่ยนเป็น Test อยู่แล้ว ให้ใช้ชื่อนั้นเลย
-            # ถ้าไม่ใช่ ให้ลองหาไฟล์ที่ลงท้ายด้วย Test
-            if [[ "$cls" == *Test ]]; then
-              TEST_NAME="$cls"
+      - name: Step 1.1 - Check Files (กวาดไฟล์อะไรมาบ้าง ที่ใช้การ Deploy)
+        run: |
+          echo "--- รายการไฟล์ใน delta/force-app ---"
+          find delta/force-app -type f || echo "ไม่มีไฟล์ใน force-app (อาจมีแต่การลบ)"
+
+      - name: Step 1.2 - Check Delta Folder Structure
+        run: |
+          echo "--- โครงสร้างโฟลเดอร์ delta ---"
+          ls -la delta/
+          echo "--- โครงสร้างใน destructiveChanges ---"
+          ls -la delta/destructiveChanges || echo "ไม่พบโฟลเดอร์ destructiveChanges"
+          echo "--- โครงสร้างใน package ---"
+          ls -la delta/package || echo "ไม่พบโฟลเดอร์ package"
+
+      - name: Step 1.3.1 - Read Destructive XML (ใบสั่งประหาร)
+        id: read_destructive
+        run: |
+          echo "--- ตรวจสอบรายการที่จะลบบน Org ---"
+          if [ -f "delta/destructiveChanges/destructiveChanges.xml" ]; then
+            cat delta/destructiveChanges/destructiveChanges.xml
+            # เช็คว่ามีรายการสมาชิกที่จะลบจริงไหม
+            if grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml; then
+              echo "HAS_DEL=true" >> $GITHUB_ENV
+              echo "สถานะ: มีรายการสั่งลบ"
             else
-              TEST_NAME="${cls}Test"
+              echo "HAS_DEL=false" >> $GITHUB_ENV
+              echo "สถานะ: ใบประหารว่างเปล่า"
             fi
-            
-            # 3. ค้นหาไฟล์ Test ในโปรเจกต์ (ใช้ -iname เพื่อไม่ให้พลาดเรื่องตัวพิมพ์เล็กใหญ่)
-            # ค้นหาไฟล์ที่มีชื่อตรงกับ TEST_NAME.cls
-            FOUND_PATH=$(find force-app -iname "${TEST_NAME}.cls" -print -quit)
-            
-            if [ -n "$FOUND_PATH" ]; then
-              # ดึงชื่อคลาสจริงๆ จากไฟล์ที่หาเจอ (ป้องกันเรื่อง Case Sensitive)
-              ACTUAL_TEST_NAME=$(basename "$FOUND_PATH" .cls)
-              echo "✅ Found matching test: $ACTUAL_TEST_NAME (at $FOUND_PATH)"
-              FINAL_TESTS="$FINAL_TESTS $ACTUAL_TEST_NAME"
+          else
+            echo "HAS_DEL=false" >> $GITHUB_ENV
+            echo "สถานะ: ไม่พบไฟล์ใบสั่งประหาร"
+          fi
+
+          echo "--- ตรวจสอบหน้าปก (Dummy Package) ---"
+          cat delta/destructiveChanges/package.xml || echo "ไม่พบไฟล์หน้าปกสำหรับชุดลบ"
+
+      - name: Step 1.3.2 - Read Package XML (ใบสั่งของใหม่)
+        id: read_package
+        run: |
+          echo "--- ตรวจสอบรายการที่จะติดตั้งใหม่/อัปเดต ---"
+          if [ -f "delta/package/package.xml" ]; then
+            cat delta/package/package.xml
+            if grep -q "<members>" delta/package/package.xml; then
+              echo "HAS_PKG=true" >> $GITHUB_ENV
+              echo "สถานะ: มีรายการของใหม่ที่จะลง"
             else
-              echo "⚠️ Warning: No test file found for $cls (Looked for ${TEST_NAME}.cls)"
+              echo "HAS_PKG=false" >> $GITHUB_ENV
+              echo "สถานะ: ไม่มีของใหม่ในชุดนี้"
+            fi
+          else
+            echo "HAS_PKG=false" >> $GITHUB_ENV
+          fi
+
+      - name: Step 1.3.3 - Final Decision (ตัดสินใจว่าจะ Deploy หรือไม่)
+        run: |
+          echo "สรุปผลการตรวจสอบ:"
+          echo "มีการสั่งลบ (HAS_DEL): ${{ env.HAS_DEL }}"
+          echo "มีการสั่งลงของ (HAS_PKG): ${{ env.HAS_PKG }}"
+
+          if [ "${{ env.HAS_DEL }}" = "true" ] || [ "${{ env.HAS_PKG }}" = "true" ]; then
+            echo "SHOULD_DEPLOY=true" >> $GITHUB_ENV
+            echo "Action: ดำเนินการ Deploy ต่อไป"
+          else
+            echo "SHOULD_DEPLOY=false" >> $GITHUB_ENV
+            echo "Action: ข้ามการ Deploy เนื่องจากไม่มีการเปลี่ยนแปลง"
+          fi    
+
+      - name: Step 1.4 - Read Deployment Package XML
+        run: |
+          echo "--- เนื้อหา package.xml (สำหรับ deploy) ---"
+          cat delta/package/package.xml || echo "ไม่มีไฟล์ package สำหรับ deploy"
+
+      - name: Step 1.5 - Set HAS_CHANGES Variable
+        run: |
+          if [ -f "delta/package/package.xml" ] && grep -q "<types>" delta/package/package.xml; then
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+            echo "มีการเปลี่ยนแปลงที่ต้อง Deploy"
+          else
+            echo "HAS_CHANGES=false" >> $GITHUB_ENV
+            echo "ไม่มีไฟล์ใหม่หรือไฟล์ที่แก้ไข"
+          fi
+
+      - name: Step 2 - ตรวจสอบความสมบูรณ์ของไฟล์ (ป้องกันการลืมไฟล์ XML) -
+        if: env.HAS_CHANGES == 'true'
+        run: |
+          echo "Checking for missing -meta.xml files..."
+          # สคริปต์สั้นๆ เพื่อเช็คว่าถ้ามีไฟล์ .page หรือ .cls ต้องมี -meta.xml คู่กันในโฟลเดอร์ delta
+          # ถ้าไม่มี ระบบจะไปก๊อปปี้มาจากโปรเจกต์หลักให้เอง (ถ้าไฟล์นั้นมีอยู่ใน git history)
+          find delta/force-app -name "*.page" -o -name "*.cls" | while read f; do
+            if [ ! -f "${f}-meta.xml" ]; then
+              echo "Warning: ${f}-meta.xml missing in delta folder. Trying to recover..."
+              cp "${f}-meta.xml" "delta/force-app/${f#delta/force-app/}-meta.xml" || echo "❌ Error: Cannot find source ${f}-meta.xml"
             fi
           done
-
-          # 4. กำจัดตัวซ้ำและบันทึกค่า
-          CLEAN_TESTS=$(echo $FINAL_TESTS | xargs -n1 | sort -u | xargs)
-          
-          echo "test_classes=$CLEAN_TESTS" >> $GITHUB_ENV
-          echo "🚀 FINAL_RESULT_TESTS: $CLEAN_TESTS"
-
-      # --- 5. Deploy (ปรับปรุง: ยืดหยุ่นตามสภาพแวดล้อมและผลลัพธ์การหา Test) ---
-      - name: Deploy Selective Source
+      
+      - name: Step 2.1 - ดึงรายชื่อ Test Classes
+        if: env.HAS_CHANGES == 'true'
         run: |
-          HAS_CHANGES=false
-          if [ -f "delta/package/package.xml" ] && grep -q "<members>" delta/package/package.xml; then HAS_CHANGES=true; fi
-          if [ -f "delta/destructiveChanges/destructiveChanges.xml" ] && grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml; then HAS_CHANGES=true; fi
+          # ตรวจสอบว่าทุกบรรทัดภายใต้ run: | ต้องย่อหน้าเยื้องเข้าไป 2 หรือ 10 spaces ให้เท่ากัน
+          TEST_CLASSES=$(grep -oE '<members>[^<]*Test[^<]*</members>' delta/package/package.xml | sed 's/<members>//g;s/<\/members>//g' | xargs)
+          
+          echo "TEST_CLASSES=$TEST_CLASSES" >> $GITHUB_ENV
+          echo "รายชื่อ Test ที่จะรัน: $TEST_CLASSES"
 
-          if [ "$HAS_CHANGES" = "true" ]; then
-            if [ -n "${{ env.test_classes }}" ]; then
-              echo "Running with Specified Tests: ${{ env.test_classes }}"
-              DEPLOY_ARGS="--test-level RunSpecifiedTests --tests ${{ env.test_classes }}"
-            else
-              echo "No valid Apex tests found. Using NoTestRun (or change to RunLocalTests for Production)."
-              DEPLOY_ARGS="--test-level NoTestRun"
-            fi
-
-            sf project deploy start \
-              --manifest delta/package/package.xml \
-              --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
-              $DEPLOY_ARGS \
-              --api-version ${{ env.SF_API_VERSION }} \
-              --wait 30
+      - name: Step 3 - Identify Deleted Metadata
+        if: env.SHOULD_DEPLOY == 'true'
+        run: |
+          echo "--- List of files to be DELETED from Salesforce ---"
+          if grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml 2>/dev/null; then
+            grep "<members>" delta/destructiveChanges/destructiveChanges.xml | sed 's/^[[:space:]]*//;s/<members>//g;s/<\/members>//g'
           else
-            echo "No Salesforce metadata changes detected. Skipping deploy."
+            echo "No files identified for deletion."
           fi
 
-      - name: Summary
-        if: always()
+      - name: Step 3.1 - Identify New or Updated Metadata
+        if: env.SHOULD_DEPLOY == 'true'
         run: |
-          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tests Run:** ${{ env.test_classes || 'None' }}" >> $GITHUB_STEP_SUMMARY
-          [ -f delta/package/package.xml ] && echo "- **Delta Manifest Created**" >> $GITHUB_STEP_SUMMARY || echo "- **No Changes Detected**" >> $GITHUB_STEP_SUMMARY
+          echo "--- List of files to be DEPLOYED/UPDATED to Salesforce ---"
+          if [ -d "delta/force-app" ]; then
+            find delta/force-app -type f | sed 's|delta/force-app/||'
+          else
+            echo "No new or updated files identified."
+          fi
+
+      - name: Step 3.2 - Validate and Run Tests (Dry Run)
+        if: env.SHOULD_DEPLOY == 'true'
+        run: |
+          echo "🚀 Starting Dry Run Validation (Standard Required: 75%)"
+          
+          # ใช้ --junit เพื่อให้ระบบเก็บผลลัพธ์ และ --verbose เพื่อความละเอียด
+          # เพิ่ม --coverage-format "terse" เพื่อให้มันสรุป % มาให้ดูด้วย
+          VALIDATE_CMD="sf project deploy start \
+            --manifest delta/package/package.xml \
+            --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+            --target-org my-org \
+            --ignore-warnings \
+            --dry-run \
+            --wait 30"
+
+          if [ -n "${{ env.TEST_CLASSES }}" ]; then
+            echo "Running Specified Tests: ${{ env.TEST_CLASSES }}"
+            # ห้ามใส่ " " ครอบ ${{ env.TEST_CLASSES }} เพื่อให้ Shell แยกเป็นหลายไฟล์
+            $VALIDATE_CMD --test-level RunSpecifiedTests --tests ${{ env.TEST_CLASSES }} --verbose
+          else
+            echo "No specific tests found. Validating Metadata only..."
+            $VALIDATE_CMD --test-level NoTestRun
+          fi
+
+      - name: Step 3.3 - Execute Actual Deployment
+        if: env.SHOULD_DEPLOY == 'true'
+        run: |
+          echo "Validation passed! Starting actual deployment..."
+          
+          # ตัด --dry-run ออกเพื่อลงของจริง
+          # ถ้าผ่านการ Validate มาแล้ว สามารถใช้ NoTestRun เพื่อความรวดเร็วได้ (ถ้า Org ยอมรับ)
+          sf project deploy start \
+            --manifest delta/package/package.xml \
+            --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+            --target-org my-org \
+            --test-level NoTestRun \
+            --ignore-warnings \
+            --wait 30
+ 

@@ -6,4 +6,5 @@ private class ClassThreeTest {
         String result = ClassThree.getPriority(100);
         Assert.areEqual('Critical', result);
     }
+    // ถ้าจะให้ครอบคลุมทุกกิ่ง ต้องเขียนเทสเพิ่มอีก 3 กิ่ง (Branches) ดังนี้
 }

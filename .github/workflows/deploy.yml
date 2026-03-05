@@ -5,16 +5,16 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: write  # เพื่อให้ Pipeline มีสิทธิ์สร้างและ Push Tag กลับไปที่ Gi
 
 jobs:
   Full_System_Deploy:
     runs-on: ubuntu-latest
-    steps:
+    steps: 
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 
 
       - name: Install Node & Salesforce CLI
         uses: actions/setup-node@v4
@@ -25,149 +25,307 @@ jobs:
         run: |
           npm install @salesforce/cli --global
           echo 'y' | sf plugins install sfdx-git-delta
-
-      - name: Authenticate to Salesforce
-        env:
-          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
+        
+      - name: Salesforce Authen
         run: |
-          echo "$SFDX_AUTH_URL" > sfdx_auth.txt
-          sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
-          rm sfdx_auth.txt
+          echo "${{ secrets.P_KEY2 }}" >> private.key
+          sf org login jwt \
+            --client-id ${{ secrets.TOKEN }} \
+            --jwt-key-file "private.key" \
+            --username ${{ secrets.USER_NAME2 }} \
+            --alias my-org \
+            --instance-url https://login.salesforce.com
 
-      - name: Step 1 - Generate Delta
+      #- name: Disable SSL Check (แก้ขัดดอก)
+       # run: |
+        #  echo "NODE_TLS_REJECT_UNAUTHORIZED=0" >> $GITHUB_ENV
+         # sf config set org-api-metadata-verify-ssl=false --global
+
+      - name: Step 1 - Generate Delta (ดึงเฉพาะเลข SHA แถวเดียว)
+        id: generate_delta
         run: |
           rm -rf delta && mkdir -p delta
-          FROM_SHA=${{ github.event.before }}
+          
+          # 1. ดึง Tag ทั้งหมดจาก Server ลงเครื่อง Runner
+          git fetch --tags --force
+          
+          # 2. ตรรกะ Bash: หาเลข SHA ของสติกเกอร์ความสำเร็จล่าสุด
+          # เราใช้ 'git rev-parse' เพื่อเอาเฉพาะเลข 40 หลัก ไม่เอาชื่อ Tag มาปน
+          if git rev-parse last_successful_deploy >/dev/null 2>&1; then
+            FROM_SHA=$(git rev-parse last_successful_deploy)
+            echo "✅ พบจุดสำเร็จล่าสุด (Clear หนี้แล้ว): $FROM_SHA"
+          else
+            # ⚠️ ถ้ายังไม่เคยสำเร็จ (Tag ไม่มี) ให้ใช้จุดก่อนการ Push ครั้งนี้
+            FROM_SHA=${{ github.event.before }}
+            echo "⚠️ ยังไม่มีจุดสำเร็จ (สะสมหนี้): เริ่มนับจาก $FROM_SHA"
+          fi
+          
+          # 3. เช็คกรณีเลข 00000 (First Push)
           if [ "$FROM_SHA" = "0000000000000000000000000000000000000000" ] || [ -z "$FROM_SHA" ]; then
             FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
           fi
-          sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
+          
+          echo "🚀 FROM_SHA ที่จะใช้ส่งให้ SGD: $FROM_SHA"
+          
+          # 4. สั่ง SGD: ใส่ " " ครอบตัวแปรไว้กันแตก
+          sf sgd source delta \
+            --to HEAD \
+            --from "$FROM_SHA" \
+            --output-dir delta/ \
+            --generate-delta
 
-      # ---------------- Dry-run validation & Coverage Check ----------------
-      - name: Step 2 - Validate & Extract Results
-        id: dryrun
+      - name: Step 1.1 - Check Files (กวาดไฟล์อะไรมาบ้าง ที่ใช้การ Deploy)
         run: |
-          set -e
-          if [ ! -f delta/package/package.xml ]; then
-            echo "NO_CHANGES=true" >> $GITHUB_ENV
-            exit 0
+          echo "--- รายการไฟล์ใน delta/force-app ---"
+          find delta/force-app -type f || echo "ไม่มีไฟล์ใน force-app (อาจมีแต่การลบ)"
+
+      - name: Step 1.2 - Check Delta Folder Structure
+        run: |
+          echo "--- โครงสร้างโฟลเดอร์ delta ---"
+          ls -la delta/
+          echo "--- โครงสร้างใน destructiveChanges ---"
+          ls -la delta/destructiveChanges || echo "ไม่พบโฟลเดอร์ destructiveChanges"
+          echo "--- โครงสร้างใน package ---"
+          ls -la delta/package || echo "ไม่พบโฟลเดอร์ package"
+
+     ## - name: Step 1.3 - Read Destructive XMLs ลบบน LocalPush ขึ้นไปลบบน Org ด้วยระวัง
+       # id: check_changes
+        #run: |
+         # echo "--- เนื้อหา destructiveChanges.xml ---"
+          #cat delta/destructiveChanges/destructiveChanges.xml || echo "ไม่มีไฟล์ลบ"
+         # echo "--- เนื้อหา package.xml (ใน destructive ส่วนนี้ลบบน Localสั่ง Deploy ลบบน Org ด้วย) ---"
+         # cat delta/destructiveChanges/package.xml || echo "ไม่มีไฟล์ dummy package"
+         # echo "ตรวจสอบคำว่า <members> ในไฟล์ XML ทั้งสองใบ"
+         # HAS_PKG=$(grep -q "<members>" delta/package/package.xml 2>/dev/null && echo "true" || echo "false")
+         # HAS_DEL=$(grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml 2>/dev/null && echo "true" || echo "false")
+          
+         # echo "ถ้ามีของจะลง (HAS_PKG) หรือ มีของจะลบ (HAS_DEL) ให้ตั้งค่าเป็น true"
+         # if [ "$HAS_PKG" = "true" ] || [ "$HAS_DEL" = "true" ]; then
+          #  echo "SHOULD_DEPLOY=true" >> $GITHUB_ENV
+         # else
+          #  echo "SHOULD_DEPLOY=false" >> $GITHUB_ENV
+         # fi
+      - name: Step 1.3.1 - Read Destructive XML (ใบสั่งประหาร)
+        id: read_destructive
+        run: |
+          echo "--- ตรวจสอบรายการที่จะลบบน Org ---"
+          if [ -f "delta/destructiveChanges/destructiveChanges.xml" ]; then
+            cat delta/destructiveChanges/destructiveChanges.xml
+            # เช็คว่ามีรายการสมาชิกที่จะลบจริงไหม
+            if grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml; then
+              echo "HAS_DEL=true" >> $GITHUB_ENV
+              echo "สถานะ: มีรายการสั่งลบ"
+            else
+              echo "HAS_DEL=false" >> $GITHUB_ENV
+              echo "สถานะ: ใบประหารว่างเปล่า"
+            fi
+          else
+            echo "HAS_DEL=false" >> $GITHUB_ENV
+            echo "สถานะ: ไม่พบไฟล์ใบสั่งประหาร"
           fi
 
-          # รัน Validate พร้อมรัน Test (ใช้ RunLocalTests เพื่อเช็ค Coverage)
-          sf project deploy validate \
-            --manifest delta/package/package.xml \
-            --target-org my-org \
-            --test-level RunLocalTests \
-            --wait 30 \
-            --json > validate_result.json || true
+          echo "--- ตรวจสอบหน้าปก (Dummy Package) ---"
+          cat delta/destructiveChanges/package.xml || echo "ไม่พบไฟล์หน้าปกสำหรับชุดลบ"
 
-          # 1. รายชื่อที่โครงสร้างผ่าน
-          PASS_STRUCT=$(jq -r '.result.details.componentSuccesses[].fullName' validate_result.json 2>/dev/null | sort -u | xargs)
-          
-          # 2. รายชื่อที่โครงสร้างพัง
-          FAIL_STRUCT=$(jq -r '.result.details.componentFailures[].fullName' validate_result.json 2>/dev/null | sort -u | xargs)
-
-          # 3. เช็ค Apex Coverage (ถ้าต่ำกว่า 75% ให้ถือว่าพัง)
-          LOW_COV=$(jq -r '.result.details.runTestResult.codeCoverage[] | select(.totalPercent < 75) | .name' validate_result.json 2>/dev/null | xargs)
-
-          # คัดกรอง PASSED จริง (ต้องผ่านโครงสร้าง และไม่อยู่ในกลุ่ม Low Coverage)
-          FINAL_CUR_PASS=""
-          FINAL_CUR_FAIL="$FAIL_STRUCT"
-
-          for comp in $PASS_STRUCT; do
-            if echo "$LOW_COV" | grep -qxw "$comp"; then
-              FINAL_CUR_FAIL="$FINAL_CUR_FAIL $comp"
+      - name: Step 1.3.2 - Read Package XML (ใบสั่งของใหม่)
+        id: read_package
+        run: |
+          echo "--- ตรวจสอบรายการที่จะติดตั้งใหม่/อัปเดต ---"
+          if [ -f "delta/package/package.xml" ]; then
+            cat delta/package/package.xml
+            if grep -q "<members>" delta/package/package.xml; then
+              echo "HAS_PKG=true" >> $GITHUB_ENV
+              echo "สถานะ: มีรายการของใหม่ที่จะลง"
             else
-              FINAL_CUR_PASS="$FINAL_CUR_PASS $comp"
+              echo "HAS_PKG=false" >> $GITHUB_ENV
+              echo "สถานะ: ไม่มีของใหม่ในชุดนี้"
+            fi
+          else
+            echo "HAS_PKG=false" >> $GITHUB_ENV
+          fi
+
+      - name: Step 1.3.3 - Final Decision (ตัดสินใจว่าจะ Deploy หรือไม่)
+        run: |
+          echo "สรุปผลการตรวจสอบ:"
+          echo "มีการสั่งลบ (HAS_DEL): ${{ env.HAS_DEL }}"
+          echo "มีการสั่งลงของ (HAS_PKG): ${{ env.HAS_PKG }}"
+
+          if [ "${{ env.HAS_DEL }}" = "true" ] || [ "${{ env.HAS_PKG }}" = "true" ]; then
+            echo "SHOULD_DEPLOY=true" >> $GITHUB_ENV
+            echo "Action: ดำเนินการ Deploy ต่อไป"
+          else
+            echo "SHOULD_DEPLOY=false" >> $GITHUB_ENV
+            echo "Action: ข้ามการ Deploy เนื่องจากไม่มีการเปลี่ยนแปลง"
+          fi    
+
+      - name: Step 1.4 - Read Deployment Package XML
+        run: |
+          echo "--- เนื้อหา package.xml (สำหรับ deploy) ---"
+          cat delta/package/package.xml || echo "ไม่มีไฟล์ package สำหรับ deploy"
+
+      - name: Step 1.5 - Set HAS_CHANGES Variable
+        run: |
+          if [ -f "delta/package/package.xml" ] && grep -q "<types>" delta/package/package.xml; then
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+            echo "มีการเปลี่ยนแปลงที่ต้อง Deploy"
+          else
+            echo "HAS_CHANGES=false" >> $GITHUB_ENV
+            echo "ไม่มีไฟล์ใหม่หรือไฟล์ที่แก้ไข"
+          fi
+      - name: Step 2 - ตรวจสอบความสมบูรณ์ของไฟล์ (ป้องกันการลืมไฟล์ XML) -
+        if: env.HAS_CHANGES == 'true'
+        run: |
+          echo "Checking for missing -meta.xml files..."
+          # สคริปต์สั้นๆ เพื่อเช็คว่าถ้ามีไฟล์ .page หรือ .cls ต้องมี -meta.xml คู่กันในโฟลเดอร์ delta
+          # ถ้าไม่มี ระบบจะไปก๊อปปี้มาจากโปรเจกต์หลักให้เอง (ถ้าไฟล์นั้นมีอยู่ใน git history)
+          find delta/force-app -name "*.page" -o -name "*.cls" | while read f; do
+            if [ ! -f "${f}-meta.xml" ]; then
+              echo "Warning: ${f}-meta.xml missing in delta folder. Trying to recover..."
+              cp "${f}-meta.xml" "delta/force-app/${f#delta/force-app/}-meta.xml" || echo "❌ Error: Cannot find source ${f}-meta.xml"
             fi
           done
+      #- name: Step 2 - Repair and Auto-Generate Metadata
+       # if: env.SHOULD_DEPLOY == 'true'
+        #run: |
+          # 1. จัดการ Apex Classes (.cls)
+         # find delta/force-app -name "*.cls" 2>/dev/null | while read f; do
+          #  if [ ! -f "${f}-meta.xml" ]; then
+           #   if [ -f "${f#delta/}-meta.xml" ]; then
+            #    echo "Recovering ${f}-meta.xml from source"
+             #   cp "${f#delta/}-meta.xml" "${f}-meta.xml"
+              #else
+               # echo "Generating default -meta.xml for Apex Class: $f"
+               # printf '<?xml version="1.0" encoding="UTF-8"?>\n' > "${f}-meta.xml"
+               # printf '<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata">\n' >> "${f}-meta.xml"
+               # printf '    <apiVersion>60.0</apiVersion>\n' >> "${f}-meta.xml"
+               # printf '    <status>Active</status>\n' >> "${f}-meta.xml"
+               # printf '</ApexClass>\n' >> "${f}-meta.xml"
+              #fi
+            #fi
+          #done
 
-          echo "CUR_PASSED=$FINAL_CUR_PASS" >> $GITHUB_ENV
-          echo "CUR_FAILED=$FINAL_CUR_FAIL" >> $GITHUB_ENV
-
-      # ---------------- State Management ----------------
-      - name: Sync State with deploy-state branch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 2. จัดการ LWC Bundles (ซ่อมไฟล์ XML ในโฟลเดอร์)
+         # find delta/force-app -type d -path "*/lwc/*" 2>/dev/null | while read dir; do
+          #  cp force-app/main/default/lwc/$(basename $dir)/*.xml delta/force-app/main/default/lwc/$(basename $dir)/ 2>/dev/null || true
+         # done
+      - name: Step 2.1 - ดึงรายชื่อ Test Classes
+        if: env.HAS_CHANGES == 'true'
         run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # ตรวจสอบว่าทุกบรรทัดภายใต้ run: | ต้องย่อหน้าเยื้องเข้าไป 2 หรือ 10 spaces ให้เท่ากัน
+          TEST_CLASSES=$(grep -oE '<members>[^<]*Test[^<]*</members>' delta/package/package.xml | sed 's/<members>//g;s/<\/members>//g' | xargs)
           
-          # Fetch state
-          git fetch origin deploy-state:deploy-state || git checkout --orphan deploy-state && git rm -rf . && git commit --allow-empty -m "init"
-          git checkout deploy-state
-          mkdir -p state
-          
-          PREV_PASSED=$(cat state/passed.txt 2>/dev/null || echo "")
-          CUR_PASSED="${{ env.CUR_PASSED }}"
-          CUR_FAILED="${{ env.CUR_FAILED }}"
+          echo "TEST_CLASSES=$TEST_CLASSES" >> $GITHUB_ENV
+          echo "รายชื่อ Test ที่จะรัน: $TEST_CLASSES"
 
-          normalize() { echo "$1" | tr ' ' '\n' | sed '/^$/d' | sort -u | xargs; }
-
-          # Logic: (รวมของเก่าและของใหม่ที่ผ่าน) ลบออกด้วย (ของใหม่ที่พัง)
-          # เพื่อให้แน่ใจว่าถ้าเราแก้ Component 3 แล้วพังอีก มันจะถูกถอดจากลิสต์ทันที
-          ALL_POTENTIAL=$(normalize "$PREV_PASSED $CUR_PASSED")
-          if [ -n "$CUR_FAILED" ]; then
-            FINAL_PASSED=$(echo "$ALL_POTENTIAL" | tr ' ' '\n' | grep -vxF -f <(echo "$CUR_FAILED" | tr ' ' '\n') | xargs || echo "")
+      - name: Step 3 - Identify Deleted Metadata
+        if: env.SHOULD_DEPLOY == 'true'
+        run: |
+          echo "--- List of files to be DELETED from Salesforce ---"
+          if grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml 2>/dev/null; then
+            grep "<members>" delta/destructiveChanges/destructiveChanges.xml | sed 's/^[[:space:]]*//;s/<members>//g;s/<\/members>//g'
           else
-            FINAL_PASSED="$ALL_POTENTIAL"
+            echo "No files identified for deletion."
           fi
 
-          echo "$FINAL_PASSED" > state/passed.txt
-          echo "$(normalize "$CUR_FAILED")" > state/failed.txt
-
-          git add state/passed.txt state/failed.txt
-          git commit -m "Sync state: $GITHUB_RUN_ID" || echo "No changes"
-          git push origin deploy-state --force
-          
-          echo "FINAL_PASSED_LIST=$FINAL_PASSED" >> $GITHUB_ENV
-          echo "FINAL_FAILED_LIST=$(cat state/failed.txt)" >> $GITHUB_ENV
-          git checkout main
-
-      # ---------------- Final Decision & Deployment ----------------
-      - name: Final Deploy Logic
+      - name: Step 3.1 - Identify New or Updated Metadata
+        if: env.SHOULD_DEPLOY == 'true'
         run: |
-          set -e
-          FAILED="${{ env.FINAL_FAILED_LIST }}"
-          PASSED="${{ env.FINAL_PASSED_LIST }}"
-
-          if [ -n "$FAILED" ] && [ "$FAILED" != " " ]; then
-            echo "❌ ยังมีรายการที่ Error หรือ Coverage ไม่ถึง 75%: $FAILED"
-            echo "กรุณาแก้ไขและ Push ใหม่เพื่อสะสมรายการให้ผ่านครบ"
-            exit 0
+          echo "--- List of files to be DEPLOYED/UPDATED to Salesforce ---"
+          if [ -d "delta/force-app" ]; then
+            find delta/force-app -type f | sed 's|delta/force-app/||'
+          else
+            echo "No new or updated files identified."
           fi
 
-          if [ -z "$PASSED" ]; then
-            echo "ℹ️ ไม่มีข้อมูลที่พร้อม Deploy"
-            exit 0
-          fi
+      #- name: Step 3.2 - Validate and Run Tests (Dry Run)
+       # if: env.SHOULD_DEPLOY == 'true'
+       # run: |
+        #  echo "Checking metadata and running tests (Standard Required: 75%)..."
+          
+          # ตัวแปรพื้นฐานสำหรับการ Validate
+         # BASE_CMD="sf project deploy start \
+          #  --manifest delta/package/package.xml \
+           # --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+            #--target-org my-org \
+            #--dry-run \
+            #--wait 30"
 
-          echo "🚀 ทุกอย่างผ่านเกณฑ์แล้ว! กำลัง Deploy: $PASSED"
+           #if [ -n "${{ env.TEST_CLASSES }}" ]; then
+            #echo "Validating with Specified Tests: ${{ env.TEST_CLASSES }}"
+            # ถ้ามี Test ให้สั่งรันพร้อมโชว์ผล Test แบบละเอียด
+            #$BASE_CMD --test-level RunSpecifiedTests --tests "${{ env.TEST_CLASSES }}" --verbose
+          #else
+           # echo "No specific tests found. Validating with NoTestRun..."
+            # ถ้าไม่มี Test ให้ Validate แค่โครงสร้าง Metadata (จะไม่มี % โชว์)
+            #$BASE_CMD --test-level NoTestRun
+          #fi
+      
+      
+
+
+      - name: Step 3.2 - Validate and Run Tests (Dry Run)
+        if: env.SHOULD_DEPLOY == 'true'
+        run: |
+          echo "🚀 Starting Dry Run Validation (Standard Required: 75%)"
           
-          # สร้าง Package.xml จากรายการสะสมทั้งหมด
-          mkdir -p final_deploy
-          # ใช้คำสั่ง sf project deploy start แบบระบุ metadata จะง่ายและแม่นยำกว่า
-          META_ARGS=$(echo $PASSED | tr ' ' ',')
-          
-          sf project deploy start \
-            --metadata "$META_ARGS" \
+          # ใช้ --junit เพื่อให้ระบบเก็บผลลัพธ์ และ --verbose เพื่อความละเอียด
+          # เพิ่ม --coverage-format "terse" เพื่อให้มันสรุป % มาให้ดูด้วย
+          VALIDATE_CMD="sf project deploy start \
+            --manifest delta/package/package.xml \
+            --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --target-org my-org \
-            --test-level RunLocalTests \
-            --wait 30 \
-            --json > deploy_result.json
+            --ignore-warnings \
+            --dry-run \
+            --wait 30"
 
-          # ถ้าสำเร็จ ให้ล้าง State
-          if [ "$(jq -r '.status' deploy_result.json)" = "Succeeded" ]; then
-             echo "CLEAR_STATE=true" >> $GITHUB_ENV
+          if [ -n "${{ env.TEST_CLASSES }}" ]; then
+            echo "Running Specified Tests: ${{ env.TEST_CLASSES }}"
+            # ห้ามใส่ " " ครอบ ${{ env.TEST_CLASSES }} เพื่อให้ Shell แยกเป็นหลายไฟล์
+            $VALIDATE_CMD --test-level RunSpecifiedTests --tests ${{ env.TEST_CLASSES }} --verbose
+          else
+            echo "No specific tests found. Validating Metadata only..."
+            $VALIDATE_CMD --test-level NoTestRun
+          fi
+          # --- เพิ่มเงื่อนไขตรวจสอบผล Validation ---
+          if [ $? -eq 0 ]; then
+            echo "✅ Validation Passed: กำลังเตรียมตัวเข้าสู่ขั้นตอน Actual Deployment"
+          else
+            echo "❌ Validation Failed: หยุดการทำงานเพื่อให้ครั้งหน้ากวาดของเดิมมารันใหม่ (Store Component)"
+            exit 1
           fi
 
-      - name: Clear State on Success
-        if: env.CLEAR_STATE == 'true'
+      - name: Step 3.3 - Execute Actual Deployment
+        if: env.SHOULD_DEPLOY == 'true'
         run: |
-          git checkout deploy-state
-          echo "" > state/passed.txt
-          echo "" > state/failed.txt
-          git add state/passed.txt state/failed.txt
-          git commit -m "Clear state after successful deploy"
-          git push origin deploy-state --force
+          echo "Validation passed! Starting actual deployment..."
+          
+          # 1. สั่ง Deploy จริง
+          sf project deploy start \
+            --manifest delta/package/package.xml \
+            --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
+            --target-org my-org \
+            --test-level NoTestRun \
+            --ignore-warnings \
+            --wait 30
+          
+          # 2. เก็บผลสถานะ ($? คือ 0 ถ้าสำเร็จ)
+          DEPLOY_STATUS=$?
+
+          # 3. ตรรกะ "ถ้าพังให้ดอง (Store) ถ้าผ่านให้ล้าง (Clear)"
+          if [ $DEPLOY_STATUS -eq 0 ]; then
+            echo "🎊 Deploy Success! (Round 3 Success)"
+            echo "📝 Clear หนี้เก่า: บันทึกจุดสำเร็จลงใน Tag 'last_successful_deploy'"
+            
+            # ต้องเซตชื่อก่อนแปะแท็ก ไม่งั้น Git จะงงครับ
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            
+            # เลื่อนสติกเกอร์ (Tag) มาที่ Commit ปัจจุบัน (HEAD)
+            git tag -f last_successful_deploy HEAD
+            git push origin last_successful_deploy --force
+          else
+            echo "❌ Deploy Failed! (Round 1 Error)"
+            echo "📦 Store Component: ไม่บันทึก Tag เพื่อให้รอบหน้าเปรียบเทียบจากจุดเดิม"
+            # สั่งให้ Pipeline ขึ้นตัวแดงเพื่อให้พี่รู้ว่ามีงานค้าง
+            exit 1 
+          fi

@@ -5,7 +5,7 @@ on:
       - main
 
 permissions:
-  contents: write   # จำเป็นสำหรับการ push state branch ด้วย GITHUB_TOKEN
+  contents: write
 
 jobs:
   Full_System_Deploy:
@@ -35,269 +35,139 @@ jobs:
           rm sfdx_auth.txt
 
       - name: Step 1 - Generate Delta
-        id: generate_delta
         run: |
-          rm -rf delta
-          mkdir -p delta
+          rm -rf delta && mkdir -p delta
           FROM_SHA=${{ github.event.before }}
           if [ "$FROM_SHA" = "0000000000000000000000000000000000000000" ] || [ -z "$FROM_SHA" ]; then
             FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
           fi
-          echo "Generating delta from $FROM_SHA to HEAD"
-          sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta || true
+          sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
 
-      - name: Step 1.1 - Quick checks
-        run: |
-          echo "Has package?"; [ -f delta/package/package.xml ] && echo "yes" || echo "no"
-          echo "Has destructive?"; [ -f delta/destructiveChanges/destructiveChanges.xml ] && echo "yes" || echo "no"
-
-      # ---------------- Dry-run validation ----------------
-      - name: Step 2 - Dry Run Validation (validate only)
+      # ---------------- Dry-run validation & Coverage Check ----------------
+      - name: Step 2 - Validate & Extract Results
         id: dryrun
         run: |
           set -e
           if [ ! -f delta/package/package.xml ]; then
-            echo "NO_PACKAGE=true" >> $GITHUB_ENV
-            echo "No package to validate"
+            echo "NO_CHANGES=true" >> $GITHUB_ENV
             exit 0
           fi
 
-          sf project deploy start \
+          # รัน Validate พร้อมรัน Test (ใช้ RunLocalTests เพื่อเช็ค Coverage)
+          sf project deploy validate \
             --manifest delta/package/package.xml \
-            --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --target-org my-org \
-            --ignore-warnings \
-            --dry-run \
+            --test-level RunLocalTests \
             --wait 30 \
             --json > validate_result.json || true
 
-          # parse results (jq required)
-          if command -v jq >/dev/null 2>&1; then
-            PASSED=$(jq -r '.result.details.componentSuccesses[].fullName' validate_result.json 2>/dev/null | paste -sd' ' - || echo "")
-            FAILED=$(jq -r '.result.details.componentFailures[].fullName' validate_result.json 2>/dev/null | paste -sd' ' - || echo "")
-          else
-            # fallback: grep basic parsing (less reliable)
-            PASSED=$(grep -oP '"fullName"\s*:\s*"\K[^"]+' validate_result.json 2>/dev/null | paste -sd' ' - || echo "")
-            FAILED=""
-          fi
+          # 1. รายชื่อที่โครงสร้างผ่าน
+          PASS_STRUCT=$(jq -r '.result.details.componentSuccesses[].fullName' validate_result.json 2>/dev/null | sort -u | xargs)
+          
+          # 2. รายชื่อที่โครงสร้างพัง
+          FAIL_STRUCT=$(jq -r '.result.details.componentFailures[].fullName' validate_result.json 2>/dev/null | sort -u | xargs)
 
-          echo "PASSED_COMPONENTS=$PASSED" >> $GITHUB_ENV
-          echo "FAILED_COMPONENTS=$FAILED" >> $GITHUB_ENV
-          echo "Validate done. PASSED='$PASSED' FAILED='$FAILED'"
+          # 3. เช็ค Apex Coverage (ถ้าต่ำกว่า 75% ให้ถือว่าพัง)
+          LOW_COV=$(jq -r '.result.details.runTestResult.codeCoverage[] | select(.totalPercent < 75) | .name' validate_result.json 2>/dev/null | xargs)
 
-      # ---------------- Load previous state from branch deploy-state ----------------
-      - name: Fetch deploy-state branch (if exists)
-        id: fetch_state_branch
-        run: |
-          set -e
-          git fetch origin deploy-state:deploy-state || echo "deploy-state branch not found; will create later"
-          mkdir -p state
-          if git show deploy-state:state/passed.txt >/dev/null 2>&1; then
-            git show deploy-state:state/passed.txt > state/passed.txt
-          fi
-          if git show deploy-state:state/failed.txt >/dev/null 2>&1; then
-            git show deploy-state:state/failed.txt > state/failed.txt
-          fi
-          echo "Loaded previous state files (if any):"
-          ls -la state || true
+          # คัดกรอง PASSED จริง (ต้องผ่านโครงสร้าง และไม่อยู่ในกลุ่ม Low Coverage)
+          FINAL_CUR_PASS=""
+          FINAL_CUR_FAIL="$FAIL_STRUCT"
 
-      # ---------------- Merge current validation with saved state ----------------
-      - name: Merge current validation with saved state
-        run: |
-          mkdir -p state
-          PREV_PASSED=$(cat state/passed.txt 2>/dev/null || echo "")
-          PREV_FAILED=$(cat state/failed.txt 2>/dev/null || echo "")
-
-          CUR_PASSED="${{ env.PASSED_COMPONENTS }}"
-          CUR_FAILED="${{ env.FAILED_COMPONENTS }}"
-
-          # If there was previous passed components, keep them (they were validated earlier)
-          # We only keep previously passed items if they are not in current failed list
-          # Build NEW_PASSED = union(PREV_PASSED, CUR_PASSED) - CUR_FAILED
-          echo "Prev passed: $PREV_PASSED"
-          echo "Cur passed: $CUR_PASSED"
-          echo "Cur failed: $CUR_FAILED"
-
-          # helper to normalize to one-per-space and unique
-          normalize() {
-            echo "$1" | tr ' ' '\n' | sed '/^$/d' | sort -u | paste -sd' ' - || echo ""
-          }
-
-          PREV_PASSED_N=$(normalize "$PREV_PASSED")
-          CUR_PASSED_N=$(normalize "$CUR_PASSED")
-          CUR_FAILED_N=$(normalize "$CUR_FAILED")
-
-          # union
-          ALL_PASSED=$(normalize "$PREV_PASSED_N $CUR_PASSED_N")
-
-          # remove any that are currently failed
-          if [ -n "$CUR_FAILED_N" ]; then
-            FINAL_PASSED=$(echo "$ALL_PASSED" | tr ' ' '\n' | grep -vxF -f <(echo "$CUR_FAILED_N" | tr ' ' '\n') | paste -sd' ' - || echo "")
-          else
-            FINAL_PASSED="$ALL_PASSED"
-          fi
-
-          # Save state files (we keep failed as current failed)
-          echo "$FINAL_PASSED" > state/passed.txt
-          echo "$CUR_FAILED_N" > state/failed.txt
-
-          echo "Final passed saved: $(cat state/passed.txt)"
-          echo "Final failed saved: $(cat state/failed.txt)"
-
-      # ---------------- Persist state by committing to branch deploy-state ----------------
-      - name: Commit state to deploy-state branch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # create a temporary worktree to avoid messing with current checkout
-          TMPDIR=$(mktemp -d)
-          git worktree add "$TMPDIR" origin/main
-          cd "$TMPDIR"
-
-          # create or checkout deploy-state branch
-          if git show-ref --verify --quiet refs/heads/deploy-state; then
-            git checkout deploy-state
-          else
-            git checkout --orphan deploy-state
-            git rm -rf .
-            git commit --allow-empty -m "Create deploy-state branch"
-          fi
-
-          mkdir -p state
-          cp ../state/passed.txt state/passed.txt || true
-          cp ../state/failed.txt state/failed.txt || true
-
-          git add state/passed.txt state/failed.txt || true
-          git commit -m "Update deploy state from workflow: $GITHUB_RUN_ID" || echo "No changes to commit"
-          git push origin deploy-state --force
-
-          # cleanup
-          cd -
-          git worktree remove "$TMPDIR" --force || true
-
-      # ---------------- Decide: if any failed -> do NOT deploy; else deploy all together ----------------
-      - name: Decide and Deploy if all validated
-        run: |
-          set -e
-          FAILED=$(cat state/failed.txt 2>/dev/null || echo "")
-          PASSED=$(cat state/passed.txt 2>/dev/null || echo "")
-
-          if [ -n "$FAILED" ]; then
-            echo "There are still failed components: $FAILED"
-            echo "Action: Do NOT deploy to org. Waiting for fixes."
-            exit 0
-          fi
-
-          # If no failed components and we have passed components, build final manifest and deploy
-          if [ -z "$PASSED" ]; then
-            echo "No components to deploy (nothing passed). Exiting."
-            exit 0
-          fi
-
-          echo "All components validated. Will deploy combined set: $PASSED"
-
-          # create manifest (package.xml) from PASSED list
-          mkdir -p deploy_manifest
-          echo '<?xml version="1.0" encoding="UTF-8"?>' > deploy_manifest/package.xml
-          echo '<Package xmlns="http://soap.sforce.com/2006/04/metadata">' >> deploy_manifest/package.xml
-
-          # For simplicity assume components are of same type or fullName includes type prefix like "ApexClass:MyClass"
-          # We'll try to infer type by scanning delta/package/package.xml for matching members
-          # Fallback: put them under <types><members>...<name>CustomObject</name></types> (user may need to adjust)
-          for comp in $PASSED; do
-            # try to find type from delta/package/package.xml
-            TYPE=$(xmllint --xpath "string(//types[members/text()='$comp']/name)" delta/package/package.xml 2>/dev/null || true)
-            if [ -z "$TYPE" ]; then
-              # fallback: try to detect by file extension in delta/force-app
-              FILE=$(find delta/force-app -type f -name "*$comp*.*" | head -n1 || true)
-              if [ -n "$FILE" ]; then
-                case "$FILE" in
-                  *.cls) TYPE="ApexClass" ;;
-                  *.page) TYPE="ApexPage" ;;
-                  *.component) TYPE="ApexComponent" ;;
-                  *.object) TYPE="CustomObject" ;;
-                  *.field) TYPE="CustomField" ;;
-                  *) TYPE="UnknownType" ;;
-                esac
-              else
-                TYPE="UnknownType"
-              fi
+          for comp in $PASS_STRUCT; do
+            if echo "$LOW_COV" | grep -qxw "$comp"; then
+              FINAL_CUR_FAIL="$FINAL_CUR_FAIL $comp"
+            else
+              FINAL_CUR_PASS="$FINAL_CUR_PASS $comp"
             fi
-            echo "<types><members>$comp</members><name>$TYPE</name></types>" >> deploy_manifest/package.xml
           done
 
-          echo "<version>57.0</version>" >> deploy_manifest/package.xml
-          echo "</Package>" >> deploy_manifest/package.xml
+          echo "CUR_PASSED=$FINAL_CUR_PASS" >> $GITHUB_ENV
+          echo "CUR_FAILED=$FINAL_CUR_FAIL" >> $GITHUB_ENV
 
-          cat deploy_manifest/package.xml
-
-          # Actual deploy
-          sf project deploy start \
-            --manifest deploy_manifest/package.xml \
-            --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
-            --target-org my-org \
-            --test-level NoTestRun \
-            --ignore-warnings \
-            --wait 30 \
-            --json > final_deploy_result.json || true
-
-          # check final result
-          if command -v jq >/dev/null 2>&1; then
-            SUCCESS=$(jq -r '.status' final_deploy_result.json 2>/dev/null || echo "")
-            if [ "$SUCCESS" = "Succeeded" ] || [ "$SUCCESS" = "SucceededPartial" ]; then
-              echo "FINAL_DEPLOY_OK=true" >> $GITHUB_ENV
-            else
-              echo "FINAL_DEPLOY_OK=false" >> $GITHUB_ENV
-            fi
-          else
-            # fallback: assume success if exit code 0 (we used || true so check file)
-            echo "FINAL_DEPLOY_OK=false" >> $GITHUB_ENV
-          fi
-
-      # ---------------- Clear state if final deploy succeeded ----------------
-      - name: Clear state after full success
-        if: env.FINAL_DEPLOY_OK == 'true'
+      # ---------------- State Management ----------------
+      - name: Sync State with deploy-state branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          echo "Final deploy succeeded. Clearing state in deploy-state branch."
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Fetch state
+          git fetch origin deploy-state:deploy-state || git checkout --orphan deploy-state && git rm -rf . && git commit --allow-empty -m "init"
+          git checkout deploy-state
+          mkdir -p state
+          
+          PREV_PASSED=$(cat state/passed.txt 2>/dev/null || echo "")
+          CUR_PASSED="${{ env.CUR_PASSED }}"
+          CUR_FAILED="${{ env.CUR_FAILED }}"
 
-          TMPDIR=$(mktemp -d)
-          git worktree add "$TMPDIR" origin/main
-          cd "$TMPDIR"
+          normalize() { echo "$1" | tr ' ' '\n' | sed '/^$/d' | sort -u | xargs; }
 
-          # checkout deploy-state (create if missing)
-          if git show-ref --verify --quiet refs/heads/deploy-state; then
-            git checkout deploy-state
+          # Logic: (รวมของเก่าและของใหม่ที่ผ่าน) ลบออกด้วย (ของใหม่ที่พัง)
+          # เพื่อให้แน่ใจว่าถ้าเราแก้ Component 3 แล้วพังอีก มันจะถูกถอดจากลิสต์ทันที
+          ALL_POTENTIAL=$(normalize "$PREV_PASSED $CUR_PASSED")
+          if [ -n "$CUR_FAILED" ]; then
+            FINAL_PASSED=$(echo "$ALL_POTENTIAL" | tr ' ' '\n' | grep -vxF -f <(echo "$CUR_FAILED" | tr ' ' '\n') | xargs || echo "")
           else
-            git checkout --orphan deploy-state
-            git rm -rf .
-            git commit --allow-empty -m "Create deploy-state branch"
+            FINAL_PASSED="$ALL_POTENTIAL"
           fi
 
-          # clear state files
-          mkdir -p state
+          echo "$FINAL_PASSED" > state/passed.txt
+          echo "$(normalize "$CUR_FAILED")" > state/failed.txt
+
+          git add state/passed.txt state/failed.txt
+          git commit -m "Sync state: $GITHUB_RUN_ID" || echo "No changes"
+          git push origin deploy-state --force
+          
+          echo "FINAL_PASSED_LIST=$FINAL_PASSED" >> $GITHUB_ENV
+          echo "FINAL_FAILED_LIST=$(cat state/failed.txt)" >> $GITHUB_ENV
+          git checkout main
+
+      # ---------------- Final Decision & Deployment ----------------
+      - name: Final Deploy Logic
+        run: |
+          set -e
+          FAILED="${{ env.FINAL_FAILED_LIST }}"
+          PASSED="${{ env.FINAL_PASSED_LIST }}"
+
+          if [ -n "$FAILED" ] && [ "$FAILED" != " " ]; then
+            echo "❌ ยังมีรายการที่ Error หรือ Coverage ไม่ถึง 75%: $FAILED"
+            echo "กรุณาแก้ไขและ Push ใหม่เพื่อสะสมรายการให้ผ่านครบ"
+            exit 0
+          fi
+
+          if [ -z "$PASSED" ]; then
+            echo "ℹ️ ไม่มีข้อมูลที่พร้อม Deploy"
+            exit 0
+          fi
+
+          echo "🚀 ทุกอย่างผ่านเกณฑ์แล้ว! กำลัง Deploy: $PASSED"
+          
+          # สร้าง Package.xml จากรายการสะสมทั้งหมด
+          mkdir -p final_deploy
+          # ใช้คำสั่ง sf project deploy start แบบระบุ metadata จะง่ายและแม่นยำกว่า
+          META_ARGS=$(echo $PASSED | tr ' ' ',')
+          
+          sf project deploy start \
+            --metadata "$META_ARGS" \
+            --target-org my-org \
+            --test-level RunLocalTests \
+            --wait 30 \
+            --json > deploy_result.json
+
+          # ถ้าสำเร็จ ให้ล้าง State
+          if [ "$(jq -r '.status' deploy_result.json)" = "Succeeded" ]; then
+             echo "CLEAR_STATE=true" >> $GITHUB_ENV
+          fi
+
+      - name: Clear State on Success
+        if: env.CLEAR_STATE == 'true'
+        run: |
+          git checkout deploy-state
           echo "" > state/passed.txt
           echo "" > state/failed.txt
           git add state/passed.txt state/failed.txt
-          git commit -m "Clear deploy state after successful full deploy: $GITHUB_RUN_ID" || echo "No changes to commit"
+          git commit -m "Clear state after successful deploy"
           git push origin deploy-state --force
-
-          cd -
-          git worktree remove "$TMPDIR" --force || true
-
-      - name: Notify result
-        run: |
-          if [ "${{ env.FINAL_DEPLOY_OK }}" = "true" ]; then
-            echo "Deployment completed and state cleared."
-          else
-            echo "No final deploy performed or final deploy failed. State preserved for next run."
-          fi

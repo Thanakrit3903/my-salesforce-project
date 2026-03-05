@@ -23,15 +23,13 @@ jobs:
           npm install @salesforce/cli --global
           echo 'y' | sf plugins install sfdx-git-delta
         
-      - name: Salesforce Authen
+      - name: Authenticate to Salesforce
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
         run: |
-          echo "${{ secrets.P_KEY2 }}" >> private.key
-          sf org login jwt \
-            --client-id ${{ secrets.TOKEN }} \
-            --jwt-key-file "private.key" \
-            --username ${{ secrets.USER_NAME2 }} \
-            --alias my-org \
-            --instance-url https://login.salesforce.com
+          echo "$SFDX_AUTH_URL" > sfdx_auth.txt
+          sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
+          rm sfdx_auth.txt # ลบไฟล์ทิ้งทันทีเพื่อความปลอดภัย
 
       - name: Step 1 - Generate Delta (สร้างไฟล์ส่วนต่าง)
         id: generate_delta

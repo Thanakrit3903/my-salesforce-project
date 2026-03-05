@@ -300,7 +300,6 @@ jobs:
           sf project deploy start \
             --manifest delta/package/package.xml \
             --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
-            --target-org my-org \
             --test-level NoTestRun \
             --ignore-warnings \
             --wait 30

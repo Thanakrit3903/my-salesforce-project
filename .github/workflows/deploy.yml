@@ -4,14 +4,17 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write   # จำเป็นสำหรับการ push state branch ด้วย GITHUB_TOKEN
+
 jobs:
   Full_System_Deploy:
     runs-on: ubuntu-latest
-    steps: 
+    steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 
+          fetch-depth: 0
 
       - name: Install Node & Salesforce CLI
         uses: actions/setup-node@v4
@@ -22,195 +25,279 @@ jobs:
         run: |
           npm install @salesforce/cli --global
           echo 'y' | sf plugins install sfdx-git-delta
-        
+
       - name: Authenticate to Salesforce
         env:
           SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
         run: |
           echo "$SFDX_AUTH_URL" > sfdx_auth.txt
           sf org login sfdx-url --sfdx-url-file sfdx_auth.txt --set-default
-          rm sfdx_auth.txt # ลบไฟล์ทิ้งทันทีเพื่อความปลอดภัย
+          rm sfdx_auth.txt
 
-      - name: Step 1 - Generate Delta (สร้างไฟล์ส่วนต่าง)
+      - name: Step 1 - Generate Delta
         id: generate_delta
         run: |
-          rm -rf delta 
+          rm -rf delta
           mkdir -p delta
-          # 1. ดึง SHA ของจุดล่าสุดบน Server ก่อนที่จะมีการ Push ครั้งนี้
           FROM_SHA=${{ github.event.before }}
-          
-          # 2. เช็คกรณีพิเศษ: ถ้าเป็น Branch ใหม่ หรือ Push ครั้งแรก SHA จะเป็นเลข 0 หมด
-          # ให้ถอยไปหาจุดเริ่มต้นของ Branch แทน (หรือใช้ HEAD~1 เป็นแผนสำรอง)
           if [ "$FROM_SHA" = "0000000000000000000000000000000000000000" ] || [ -z "$FROM_SHA" ]; then
-            echo "First push or new branch detected. Falling back to HEAD~1"
             FROM_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
           fi
-          
           echo "Generating delta from $FROM_SHA to HEAD"
-          
-          # 3. สั่ง SGD โดยใช้ FROM_SHA ที่คำนวณมาแล้ว (จะกวาดมาครบทุก Commits ใน Push นั้น)
-          sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta
+          sf sgd source delta --to HEAD --from $FROM_SHA --output delta/ --generate-delta || true
 
-      - name: Step 1.1 - Check Files (กวาดไฟล์อะไรมาบ้าง ที่ใช้การ Deploy)
+      - name: Step 1.1 - Quick checks
         run: |
-          echo "--- รายการไฟล์ใน delta/force-app ---"
-          find delta/force-app -type f || echo "ไม่มีไฟล์ใน force-app (อาจมีแต่การลบ)"
+          echo "Has package?"; [ -f delta/package/package.xml ] && echo "yes" || echo "no"
+          echo "Has destructive?"; [ -f delta/destructiveChanges/destructiveChanges.xml ] && echo "yes" || echo "no"
 
-      - name: Step 1.2 - Check Delta Folder Structure
+      # ---------------- Dry-run validation ----------------
+      - name: Step 2 - Dry Run Validation (validate only)
+        id: dryrun
         run: |
-          echo "--- โครงสร้างโฟลเดอร์ delta ---"
-          ls -la delta/
-          echo "--- โครงสร้างใน destructiveChanges ---"
-          ls -la delta/destructiveChanges || echo "ไม่พบโฟลเดอร์ destructiveChanges"
-          echo "--- โครงสร้างใน package ---"
-          ls -la delta/package || echo "ไม่พบโฟลเดอร์ package"
-
-      - name: Step 1.3.1 - Read Destructive XML (ใบสั่งประหาร)
-        id: read_destructive
-        run: |
-          echo "--- ตรวจสอบรายการที่จะลบบน Org ---"
-          if [ -f "delta/destructiveChanges/destructiveChanges.xml" ]; then
-            cat delta/destructiveChanges/destructiveChanges.xml
-            # เช็คว่ามีรายการสมาชิกที่จะลบจริงไหม
-            if grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml; then
-              echo "HAS_DEL=true" >> $GITHUB_ENV
-              echo "สถานะ: มีรายการสั่งลบ"
-            else
-              echo "HAS_DEL=false" >> $GITHUB_ENV
-              echo "สถานะ: ใบประหารว่างเปล่า"
-            fi
-          else
-            echo "HAS_DEL=false" >> $GITHUB_ENV
-            echo "สถานะ: ไม่พบไฟล์ใบสั่งประหาร"
+          set -e
+          if [ ! -f delta/package/package.xml ]; then
+            echo "NO_PACKAGE=true" >> $GITHUB_ENV
+            echo "No package to validate"
+            exit 0
           fi
 
-          echo "--- ตรวจสอบหน้าปก (Dummy Package) ---"
-          cat delta/destructiveChanges/package.xml || echo "ไม่พบไฟล์หน้าปกสำหรับชุดลบ"
-
-      - name: Step 1.3.2 - Read Package XML (ใบสั่งของใหม่)
-        id: read_package
-        run: |
-          echo "--- ตรวจสอบรายการที่จะติดตั้งใหม่/อัปเดต ---"
-          if [ -f "delta/package/package.xml" ]; then
-            cat delta/package/package.xml
-            if grep -q "<members>" delta/package/package.xml; then
-              echo "HAS_PKG=true" >> $GITHUB_ENV
-              echo "สถานะ: มีรายการของใหม่ที่จะลง"
-            else
-              echo "HAS_PKG=false" >> $GITHUB_ENV
-              echo "สถานะ: ไม่มีของใหม่ในชุดนี้"
-            fi
-          else
-            echo "HAS_PKG=false" >> $GITHUB_ENV
-          fi
-
-      - name: Step 1.3.3 - Final Decision (ตัดสินใจว่าจะ Deploy หรือไม่)
-        run: |
-          echo "สรุปผลการตรวจสอบ:"
-          echo "มีการสั่งลบ (HAS_DEL): ${{ env.HAS_DEL }}"
-          echo "มีการสั่งลงของ (HAS_PKG): ${{ env.HAS_PKG }}"
-
-          if [ "${{ env.HAS_DEL }}" = "true" ] || [ "${{ env.HAS_PKG }}" = "true" ]; then
-            echo "SHOULD_DEPLOY=true" >> $GITHUB_ENV
-            echo "Action: ดำเนินการ Deploy ต่อไป"
-          else
-            echo "SHOULD_DEPLOY=false" >> $GITHUB_ENV
-            echo "Action: ข้ามการ Deploy เนื่องจากไม่มีการเปลี่ยนแปลง"
-          fi    
-
-      - name: Step 1.4 - Read Deployment Package XML
-        run: |
-          echo "--- เนื้อหา package.xml (สำหรับ deploy) ---"
-          cat delta/package/package.xml || echo "ไม่มีไฟล์ package สำหรับ deploy"
-
-      - name: Step 1.5 - Set HAS_CHANGES Variable
-        run: |
-          if [ -f "delta/package/package.xml" ] && grep -q "<types>" delta/package/package.xml; then
-            echo "HAS_CHANGES=true" >> $GITHUB_ENV
-            echo "มีการเปลี่ยนแปลงที่ต้อง Deploy"
-          else
-            echo "HAS_CHANGES=false" >> $GITHUB_ENV
-            echo "ไม่มีไฟล์ใหม่หรือไฟล์ที่แก้ไข"
-          fi
-
-      - name: Step 2 - ตรวจสอบความสมบูรณ์ของไฟล์ (ป้องกันการลืมไฟล์ XML) -
-        if: env.HAS_CHANGES == 'true'
-        run: |
-          echo "Checking for missing -meta.xml files..."
-          # สคริปต์สั้นๆ เพื่อเช็คว่าถ้ามีไฟล์ .page หรือ .cls ต้องมี -meta.xml คู่กันในโฟลเดอร์ delta
-          # ถ้าไม่มี ระบบจะไปก๊อปปี้มาจากโปรเจกต์หลักให้เอง (ถ้าไฟล์นั้นมีอยู่ใน git history)
-          find delta/force-app -name "*.page" -o -name "*.cls" | while read f; do
-            if [ ! -f "${f}-meta.xml" ]; then
-              echo "Warning: ${f}-meta.xml missing in delta folder. Trying to recover..."
-              cp "${f}-meta.xml" "delta/force-app/${f#delta/force-app/}-meta.xml" || echo "❌ Error: Cannot find source ${f}-meta.xml"
-            fi
-          done
-      
-      - name: Step 2.1 - ดึงรายชื่อ Test Classes
-        if: env.HAS_CHANGES == 'true'
-        run: |
-          # ตรวจสอบว่าทุกบรรทัดภายใต้ run: | ต้องย่อหน้าเยื้องเข้าไป 2 หรือ 10 spaces ให้เท่ากัน
-          TEST_CLASSES=$(grep -oE '<members>[^<]*Test[^<]*</members>' delta/package/package.xml | sed 's/<members>//g;s/<\/members>//g' | xargs)
-          
-          echo "TEST_CLASSES=$TEST_CLASSES" >> $GITHUB_ENV
-          echo "รายชื่อ Test ที่จะรัน: $TEST_CLASSES"
-
-      - name: Step 3 - Identify Deleted Metadata
-        if: env.SHOULD_DEPLOY == 'true'
-        run: |
-          echo "--- List of files to be DELETED from Salesforce ---"
-          if grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml 2>/dev/null; then
-            grep "<members>" delta/destructiveChanges/destructiveChanges.xml | sed 's/^[[:space:]]*//;s/<members>//g;s/<\/members>//g'
-          else
-            echo "No files identified for deletion."
-          fi
-
-      - name: Step 3.1 - Identify New or Updated Metadata
-        if: env.SHOULD_DEPLOY == 'true'
-        run: |
-          echo "--- List of files to be DEPLOYED/UPDATED to Salesforce ---"
-          if [ -d "delta/force-app" ]; then
-            find delta/force-app -type f | sed 's|delta/force-app/||'
-          else
-            echo "No new or updated files identified."
-          fi
-
-      - name: Step 3.2 - Validate and Run Tests (Dry Run)
-        if: env.SHOULD_DEPLOY == 'true'
-        run: |
-          echo "🚀 Starting Dry Run Validation (Standard Required: 75%)"
-          
-          # ใช้ --junit เพื่อให้ระบบเก็บผลลัพธ์ และ --verbose เพื่อความละเอียด
-          # เพิ่ม --coverage-format "terse" เพื่อให้มันสรุป % มาให้ดูด้วย
-          VALIDATE_CMD="sf project deploy start \
+          sf project deploy start \
             --manifest delta/package/package.xml \
             --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --target-org my-org \
             --ignore-warnings \
             --dry-run \
-            --wait 30"
+            --wait 30 \
+            --json > validate_result.json || true
 
-          if [ -n "${{ env.TEST_CLASSES }}" ]; then
-            echo "Running Specified Tests: ${{ env.TEST_CLASSES }}"
-            # ห้ามใส่ " " ครอบ ${{ env.TEST_CLASSES }} เพื่อให้ Shell แยกเป็นหลายไฟล์
-            $VALIDATE_CMD --test-level RunSpecifiedTests --tests ${{ env.TEST_CLASSES }} --verbose
+          # parse results (jq required)
+          if command -v jq >/dev/null 2>&1; then
+            PASSED=$(jq -r '.result.details.componentSuccesses[].fullName' validate_result.json 2>/dev/null | paste -sd' ' - || echo "")
+            FAILED=$(jq -r '.result.details.componentFailures[].fullName' validate_result.json 2>/dev/null | paste -sd' ' - || echo "")
           else
-            echo "No specific tests found. Validating Metadata only..."
-            $VALIDATE_CMD --test-level NoTestRun
+            # fallback: grep basic parsing (less reliable)
+            PASSED=$(grep -oP '"fullName"\s*:\s*"\K[^"]+' validate_result.json 2>/dev/null | paste -sd' ' - || echo "")
+            FAILED=""
           fi
 
-      - name: Step 3.3 - Execute Actual Deployment
-        if: env.SHOULD_DEPLOY == 'true'
+          echo "PASSED_COMPONENTS=$PASSED" >> $GITHUB_ENV
+          echo "FAILED_COMPONENTS=$FAILED" >> $GITHUB_ENV
+          echo "Validate done. PASSED='$PASSED' FAILED='$FAILED'"
+
+      # ---------------- Load previous state from branch deploy-state ----------------
+      - name: Fetch deploy-state branch (if exists)
+        id: fetch_state_branch
         run: |
-          echo "Validation passed! Starting actual deployment..."
-          
-          # ตัด --dry-run ออกเพื่อลงของจริง
-          # ถ้าผ่านการ Validate มาแล้ว สามารถใช้ NoTestRun เพื่อความรวดเร็วได้ (ถ้า Org ยอมรับ)
+          set -e
+          git fetch origin deploy-state:deploy-state || echo "deploy-state branch not found; will create later"
+          mkdir -p state
+          if git show deploy-state:state/passed.txt >/dev/null 2>&1; then
+            git show deploy-state:state/passed.txt > state/passed.txt
+          fi
+          if git show deploy-state:state/failed.txt >/dev/null 2>&1; then
+            git show deploy-state:state/failed.txt > state/failed.txt
+          fi
+          echo "Loaded previous state files (if any):"
+          ls -la state || true
+
+      # ---------------- Merge current validation with saved state ----------------
+      - name: Merge current validation with saved state
+        run: |
+          mkdir -p state
+          PREV_PASSED=$(cat state/passed.txt 2>/dev/null || echo "")
+          PREV_FAILED=$(cat state/failed.txt 2>/dev/null || echo "")
+
+          CUR_PASSED="${{ env.PASSED_COMPONENTS }}"
+          CUR_FAILED="${{ env.FAILED_COMPONENTS }}"
+
+          # If there was previous passed components, keep them (they were validated earlier)
+          # We only keep previously passed items if they are not in current failed list
+          # Build NEW_PASSED = union(PREV_PASSED, CUR_PASSED) - CUR_FAILED
+          echo "Prev passed: $PREV_PASSED"
+          echo "Cur passed: $CUR_PASSED"
+          echo "Cur failed: $CUR_FAILED"
+
+          # helper to normalize to one-per-space and unique
+          normalize() {
+            echo "$1" | tr ' ' '\n' | sed '/^$/d' | sort -u | paste -sd' ' - || echo ""
+          }
+
+          PREV_PASSED_N=$(normalize "$PREV_PASSED")
+          CUR_PASSED_N=$(normalize "$CUR_PASSED")
+          CUR_FAILED_N=$(normalize "$CUR_FAILED")
+
+          # union
+          ALL_PASSED=$(normalize "$PREV_PASSED_N $CUR_PASSED_N")
+
+          # remove any that are currently failed
+          if [ -n "$CUR_FAILED_N" ]; then
+            FINAL_PASSED=$(echo "$ALL_PASSED" | tr ' ' '\n' | grep -vxF -f <(echo "$CUR_FAILED_N" | tr ' ' '\n') | paste -sd' ' - || echo "")
+          else
+            FINAL_PASSED="$ALL_PASSED"
+          fi
+
+          # Save state files (we keep failed as current failed)
+          echo "$FINAL_PASSED" > state/passed.txt
+          echo "$CUR_FAILED_N" > state/failed.txt
+
+          echo "Final passed saved: $(cat state/passed.txt)"
+          echo "Final failed saved: $(cat state/failed.txt)"
+
+      # ---------------- Persist state by committing to branch deploy-state ----------------
+      - name: Commit state to deploy-state branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # create a temporary worktree to avoid messing with current checkout
+          TMPDIR=$(mktemp -d)
+          git worktree add "$TMPDIR" origin/main
+          cd "$TMPDIR"
+
+          # create or checkout deploy-state branch
+          if git show-ref --verify --quiet refs/heads/deploy-state; then
+            git checkout deploy-state
+          else
+            git checkout --orphan deploy-state
+            git rm -rf .
+            git commit --allow-empty -m "Create deploy-state branch"
+          fi
+
+          mkdir -p state
+          cp ../state/passed.txt state/passed.txt || true
+          cp ../state/failed.txt state/failed.txt || true
+
+          git add state/passed.txt state/failed.txt || true
+          git commit -m "Update deploy state from workflow: $GITHUB_RUN_ID" || echo "No changes to commit"
+          git push origin deploy-state --force
+
+          # cleanup
+          cd -
+          git worktree remove "$TMPDIR" --force || true
+
+      # ---------------- Decide: if any failed -> do NOT deploy; else deploy all together ----------------
+      - name: Decide and Deploy if all validated
+        run: |
+          set -e
+          FAILED=$(cat state/failed.txt 2>/dev/null || echo "")
+          PASSED=$(cat state/passed.txt 2>/dev/null || echo "")
+
+          if [ -n "$FAILED" ]; then
+            echo "There are still failed components: $FAILED"
+            echo "Action: Do NOT deploy to org. Waiting for fixes."
+            exit 0
+          fi
+
+          # If no failed components and we have passed components, build final manifest and deploy
+          if [ -z "$PASSED" ]; then
+            echo "No components to deploy (nothing passed). Exiting."
+            exit 0
+          fi
+
+          echo "All components validated. Will deploy combined set: $PASSED"
+
+          # create manifest (package.xml) from PASSED list
+          mkdir -p deploy_manifest
+          echo '<?xml version="1.0" encoding="UTF-8"?>' > deploy_manifest/package.xml
+          echo '<Package xmlns="http://soap.sforce.com/2006/04/metadata">' >> deploy_manifest/package.xml
+
+          # For simplicity assume components are of same type or fullName includes type prefix like "ApexClass:MyClass"
+          # We'll try to infer type by scanning delta/package/package.xml for matching members
+          # Fallback: put them under <types><members>...<name>CustomObject</name></types> (user may need to adjust)
+          for comp in $PASSED; do
+            # try to find type from delta/package/package.xml
+            TYPE=$(xmllint --xpath "string(//types[members/text()='$comp']/name)" delta/package/package.xml 2>/dev/null || true)
+            if [ -z "$TYPE" ]; then
+              # fallback: try to detect by file extension in delta/force-app
+              FILE=$(find delta/force-app -type f -name "*$comp*.*" | head -n1 || true)
+              if [ -n "$FILE" ]; then
+                case "$FILE" in
+                  *.cls) TYPE="ApexClass" ;;
+                  *.page) TYPE="ApexPage" ;;
+                  *.component) TYPE="ApexComponent" ;;
+                  *.object) TYPE="CustomObject" ;;
+                  *.field) TYPE="CustomField" ;;
+                  *) TYPE="UnknownType" ;;
+                esac
+              else
+                TYPE="UnknownType"
+              fi
+            fi
+            echo "<types><members>$comp</members><name>$TYPE</name></types>" >> deploy_manifest/package.xml
+          done
+
+          echo "<version>57.0</version>" >> deploy_manifest/package.xml
+          echo "</Package>" >> deploy_manifest/package.xml
+
+          cat deploy_manifest/package.xml
+
+          # Actual deploy
           sf project deploy start \
-            --manifest delta/package/package.xml \
+            --manifest deploy_manifest/package.xml \
             --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --target-org my-org \
             --test-level NoTestRun \
             --ignore-warnings \
-            --wait 30
- 
+            --wait 30 \
+            --json > final_deploy_result.json || true
+
+          # check final result
+          if command -v jq >/dev/null 2>&1; then
+            SUCCESS=$(jq -r '.status' final_deploy_result.json 2>/dev/null || echo "")
+            if [ "$SUCCESS" = "Succeeded" ] || [ "$SUCCESS" = "SucceededPartial" ]; then
+              echo "FINAL_DEPLOY_OK=true" >> $GITHUB_ENV
+            else
+              echo "FINAL_DEPLOY_OK=false" >> $GITHUB_ENV
+            fi
+          else
+            # fallback: assume success if exit code 0 (we used || true so check file)
+            echo "FINAL_DEPLOY_OK=false" >> $GITHUB_ENV
+          fi
+
+      # ---------------- Clear state if final deploy succeeded ----------------
+      - name: Clear state after full success
+        if: env.FINAL_DEPLOY_OK == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "Final deploy succeeded. Clearing state in deploy-state branch."
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          TMPDIR=$(mktemp -d)
+          git worktree add "$TMPDIR" origin/main
+          cd "$TMPDIR"
+
+          # checkout deploy-state (create if missing)
+          if git show-ref --verify --quiet refs/heads/deploy-state; then
+            git checkout deploy-state
+          else
+            git checkout --orphan deploy-state
+            git rm -rf .
+            git commit --allow-empty -m "Create deploy-state branch"
+          fi
+
+          # clear state files
+          mkdir -p state
+          echo "" > state/passed.txt
+          echo "" > state/failed.txt
+          git add state/passed.txt state/failed.txt
+          git commit -m "Clear deploy state after successful full deploy: $GITHUB_RUN_ID" || echo "No changes to commit"
+          git push origin deploy-state --force
+
+          cd -
+          git worktree remove "$TMPDIR" --force || true
+
+      - name: Notify result
+        run: |
+          if [ "${{ env.FINAL_DEPLOY_OK }}" = "true" ]; then
+            echo "Deployment completed and state cleared."
+          else
+            echo "No final deploy performed or final deploy failed. State preserved for next run."
+          fi

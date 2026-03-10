@@ -237,6 +237,7 @@ jobs:
             --test-level NoTestRun \
             --ignore-warnings \
             --wait 30
+            --verbose
           
           # 2. เก็บผลสถานะ ($? คือ 0 ถ้าสำเร็จ)
           DEPLOY_STATUS=$?

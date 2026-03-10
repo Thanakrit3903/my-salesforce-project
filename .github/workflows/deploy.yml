@@ -86,23 +86,6 @@ jobs:
           echo "--- โครงสร้างใน package ---"
           ls -la delta/package || echo "ไม่พบโฟลเดอร์ package"
 
-     ## - name: Step 1.3 - Read Destructive XMLs ลบบน LocalPush ขึ้นไปลบบน Org ด้วยระวัง
-       # id: check_changes
-        #run: |
-         # echo "--- เนื้อหา destructiveChanges.xml ---"
-          #cat delta/destructiveChanges/destructiveChanges.xml || echo "ไม่มีไฟล์ลบ"
-         # echo "--- เนื้อหา package.xml (ใน destructive ส่วนนี้ลบบน Localสั่ง Deploy ลบบน Org ด้วย) ---"
-         # cat delta/destructiveChanges/package.xml || echo "ไม่มีไฟล์ dummy package"
-         # echo "ตรวจสอบคำว่า <members> ในไฟล์ XML ทั้งสองใบ"
-         # HAS_PKG=$(grep -q "<members>" delta/package/package.xml 2>/dev/null && echo "true" || echo "false")
-         # HAS_DEL=$(grep -q "<members>" delta/destructiveChanges/destructiveChanges.xml 2>/dev/null && echo "true" || echo "false")
-          
-         # echo "ถ้ามีของจะลง (HAS_PKG) หรือ มีของจะลบ (HAS_DEL) ให้ตั้งค่าเป็น true"
-         # if [ "$HAS_PKG" = "true" ] || [ "$HAS_DEL" = "true" ]; then
-          #  echo "SHOULD_DEPLOY=true" >> $GITHUB_ENV
-         # else
-          #  echo "SHOULD_DEPLOY=false" >> $GITHUB_ENV
-         # fi
       - name: Step 1.3.1 - Read Destructive XML (ใบสั่งประหาร)
         id: read_destructive
         run: |
@@ -182,30 +165,7 @@ jobs:
               cp "${f}-meta.xml" "delta/force-app/${f#delta/force-app/}-meta.xml" || echo "❌ Error: Cannot find source ${f}-meta.xml"
             fi
           done
-      #- name: Step 2 - Repair and Auto-Generate Metadata
-       # if: env.SHOULD_DEPLOY == 'true'
-        #run: |
-          # 1. จัดการ Apex Classes (.cls)
-         # find delta/force-app -name "*.cls" 2>/dev/null | while read f; do
-          #  if [ ! -f "${f}-meta.xml" ]; then
-           #   if [ -f "${f#delta/}-meta.xml" ]; then
-            #    echo "Recovering ${f}-meta.xml from source"
-             #   cp "${f#delta/}-meta.xml" "${f}-meta.xml"
-              #else
-               # echo "Generating default -meta.xml for Apex Class: $f"
-               # printf '<?xml version="1.0" encoding="UTF-8"?>\n' > "${f}-meta.xml"
-               # printf '<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata">\n' >> "${f}-meta.xml"
-               # printf '    <apiVersion>60.0</apiVersion>\n' >> "${f}-meta.xml"
-               # printf '    <status>Active</status>\n' >> "${f}-meta.xml"
-               # printf '</ApexClass>\n' >> "${f}-meta.xml"
-              #fi
-            #fi
-          #done
 
-          # 2. จัดการ LWC Bundles (ซ่อมไฟล์ XML ในโฟลเดอร์)
-         # find delta/force-app -type d -path "*/lwc/*" 2>/dev/null | while read dir; do
-          #  cp force-app/main/default/lwc/$(basename $dir)/*.xml delta/force-app/main/default/lwc/$(basename $dir)/ 2>/dev/null || true
-         # done
       - name: Step 2.1 - ดึงรายชื่อ Test Classes
         if: env.HAS_CHANGES == 'true'
         run: |
@@ -235,32 +195,6 @@ jobs:
             echo "No new or updated files identified."
           fi
 
-      #- name: Step 3.2 - Validate and Run Tests (Dry Run)
-       # if: env.SHOULD_DEPLOY == 'true'
-       # run: |
-        #  echo "Checking metadata and running tests (Standard Required: 75%)..."
-          
-          # ตัวแปรพื้นฐานสำหรับการ Validate
-         # BASE_CMD="sf project deploy start \
-          #  --manifest delta/package/package.xml \
-           # --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
-            #--target-org my-org \
-            #--dry-run \
-            #--wait 30"
-
-           #if [ -n "${{ env.TEST_CLASSES }}" ]; then
-            #echo "Validating with Specified Tests: ${{ env.TEST_CLASSES }}"
-            # ถ้ามี Test ให้สั่งรันพร้อมโชว์ผล Test แบบละเอียด
-            #$BASE_CMD --test-level RunSpecifiedTests --tests "${{ env.TEST_CLASSES }}" --verbose
-          #else
-           # echo "No specific tests found. Validating with NoTestRun..."
-            # ถ้าไม่มี Test ให้ Validate แค่โครงสร้าง Metadata (จะไม่มี % โชว์)
-            #$BASE_CMD --test-level NoTestRun
-          #fi
-      
-      
-
-
       - name: Step 3.2 - Validate and Run Tests (Dry Run)
         if: env.SHOULD_DEPLOY == 'true'
         run: |
@@ -268,11 +202,11 @@ jobs:
           
           # ใช้ --junit เพื่อให้ระบบเก็บผลลัพธ์ และ --verbose เพื่อความละเอียด
           # เพิ่ม --coverage-format "terse" เพื่อให้มันสรุป % มาให้ดูด้วย
-          VALIDATE_CMD="sf project deploy start \
+          VALIDATE_CMD="sf project deploy validate \
             --manifest delta/package/package.xml \
             --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --ignore-warnings \
-            --dry-run \
+            # --dry-run \
             --wait 30"
 
           if [ -n "${{ env.TEST_CLASSES }}" ]; then

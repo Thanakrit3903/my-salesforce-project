@@ -1,0 +1,14 @@
+.container {
+    padding: 16px;
+}
+
+.result-item {
+    padding: 8px;
+    border-bottom: 1px solid #ddd;
+    font-weight: 500;
+}
+
+.no-data {
+    color: gray;
+    font-style: italic;
+}

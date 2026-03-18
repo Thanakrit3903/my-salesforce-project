@@ -1,0 +1,38 @@
+<template>
+    <lightning-card title="Search Account">
+        <div class="container">
+            <lightning-input label="Search Account" value={searchKey}
+                onchange={handleSearchKeyChange}></lightning-input>
+            <br>
+            <lightning-button variant="brand" label="Search" title="Search" onclick={handleSearch}></lightning-button>
+
+            <template if:true={isLoading}>
+                <lightning-spinner alternative-text="Loading"></lightning-spinner>
+            </template>
+
+            <br>
+            <template if:true={hasAccounts}>
+                <!-- <template for:each={accounts} for:item="account">
+                    <div key={account.Id} class="result-item">
+                        Name: {account.Name || '-'} <br>
+                        Industry: {account.Industry || '-'} <br>
+                        Description: {account.Description || '-'}
+                    </div>
+                </template> -->
+                <lightning-datatable key-field="Id" data={accounts} columns={columns} onsort={handleSort}
+                    sorted-by={sortedBy} sorted-direction={sortedDirection} onrowaction={handleRowAction} >
+                </lightning-datatable>
+                
+                <div class="slds-m-top_small">
+                    <lightning-button label="Prev" onclick={handlePrev}></lightning-button>
+                    <span> Page {currentPage} of {totalPages} </span>
+                    <lightning-button label="Next" onclick={handleNext}></lightning-button>
+                </div>
+            </template>
+
+            <template if:true={noAccounts}>
+                <p class="no-data">No result found.</p>
+            </template>
+        </div>
+    </lightning-card>
+</template>

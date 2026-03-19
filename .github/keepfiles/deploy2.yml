@@ -254,7 +254,7 @@ jobs:
             $VALIDATE_CMD --test-level RunSpecifiedTests --tests ${{ env.TEST_CLASSES }} --verbose
           else
             echo "No specific tests found. Validating Metadata only..."
-            $VALIDATE_CMD --test-level NoTestRun
+            $VALIDATE_CMD --test-level RunLocalTests
           fi
           # --- เพิ่มเงื่อนไขตรวจสอบผล Validation ---
           if [ $? -eq 0 ]; then
@@ -273,7 +273,7 @@ jobs:
           sf project deploy start \
             --manifest delta/package/package.xml \
             --target-org my-org \
-            --test-level NoTestRun \
+            --test-level RunLocalTests \
             --ignore-warnings \
             --wait 30
           

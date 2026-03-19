@@ -259,3 +259,5 @@ jobs:
             # สั่งให้ Pipeline ขึ้นตัวแดงเพื่อให้พี่รู้ว่ามีงานค้าง
             exit 1 
           fi
+      - name: Debug Org Info
+        run: sf org display   

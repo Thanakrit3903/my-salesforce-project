@@ -235,7 +235,7 @@ jobs:
             --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --test-level NoTestRun \
             --ignore-warnings \
-            --wait 30
+            --wait 30 \
             --verbose
           
           # 2. เก็บผลสถานะ ($? คือ 0 ถ้าสำเร็จ)

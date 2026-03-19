@@ -206,7 +206,6 @@ jobs:
             --manifest delta/package/package.xml \
             --pre-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --ignore-warnings \
-            # --dry-run \
             --wait 30"
 
           if [ -n "${{ env.TEST_CLASSES }}" ]; then
